@@ -1,0 +1,166 @@
+"""Phone normalisation, deduplication, and the three-layer fallback ladder.
+
+normalise_phone() gets the most attention in this file because its return value
+gets DIALLED. Every input below is a real shape seen in Hong Kong OSM data.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+import places
+from harness import FakeNet, Suite, http_error, overpass_ok, timeout_error, url_error
+
+
+def run() -> Suite:
+    s = Suite("places", expect_at_least=40)
+
+    # --- phone normalisation: every real-world shape ----------------------
+    good = {
+        "+852 2527 2343": "+85225272343",
+        "+85225272343": "+85225272343",
+        "25734554": "+85225734554",
+        "2573 4554": "+85225734554",
+        "852-2857-5511": "+85228575511",
+        "+852-2522-1234": "+85225221234",
+        "tel:+852 2522 1234": "+85225221234",
+        "00852 2522 1234": "+85225221234",
+        "2522 1234 (shop)": "+85225221234",
+        "+852 2877 3833; +852 2877 3834": "+85228773833",
+        "+852 2877 3833, +852 2877 3834": "+85228773833",
+        "2877 3833 or 2877 3834": "+85228773833",
+        "  +852  2527  2343  ": "+85225272343",
+        "(852) 2527 2343": "+85225272343",
+    }
+    for raw, want in good.items():
+        s.eq(f"normalise {raw!r}", places.normalise_phone(raw), want)
+
+    # Anything we cannot be certain about must come back None. A plausible-
+    # looking wrong number is worse than no number, because somebody dials it.
+    bad = ["1234", "", "   ", None, "no phone", "+1 415 555 1234", "+44 20 7946 0958",
+           "852", "123456789012345", "0000 0000", "+852 1234 5678", 12345, [], {}]
+    for raw in bad:
+        s.eq(f"reject {raw!r} rather than half-parse it", places.normalise_phone(raw), None)
+
+    s.check("every returned number is E.164 +852 plus 8 digits",
+            all(places.normalise_phone(v) and len(places.normalise_phone(v)) == 12 for v in good))
+
+    # --- English names ----------------------------------------------------
+    s.eq("prefers name:en over the bilingual blob",
+         places._name_for({"name": "美心Food² Maxim's Food²", "name:en": "Maxim's Food²"}),
+         "Maxim's Food²")
+    s.eq("falls back to int_name", places._name_for({"name": "上海婆婆", "int_name": "Shanghai Popo"}), "Shanghai Popo")
+    s.eq("falls back to name", places._name_for({"name": "Kau Kee"}), "Kau Kee")
+    s.eq("no name at all yields empty", places._name_for({}), "")
+
+    # --- districts --------------------------------------------------------
+    s.eq("Central coordinates map to Central", places._district_for(22.2820, 114.1580), "Central")
+    s.eq("Sheung Wan coordinates map to Sheung Wan", places._district_for(22.2860, 114.1500), "Sheung Wan")
+    s.eq("Mong Kok coordinates map to Mong Kok", places._district_for(22.3190, 114.1700), "Mong Kok")
+    s.eq("Sha Tin coordinates map to Sha Tin", places._district_for(22.3800, 114.1900), "Sha Tin")
+    s.eq("London is not a Hong Kong district", places._district_for(51.5, -0.12), "")
+    s.eq("missing coordinates yield empty, not a crash", places._district_for(None, None), "")
+
+    # --- cuisine ----------------------------------------------------------
+    s.eq("cuisine tag is humanised", places._cuisine_for({"cuisine": "dim_sum"}), "dim sum")
+    s.eq("multi-value cuisine is split", places._cuisine_for({"cuisine": "chinese;cantonese"}), "Chinese, Cantonese")
+    s.eq("fast_food with no cuisine is labelled", places._cuisine_for({"amenity": "fast_food"}), "fast food")
+    s.eq("no cuisine and no amenity yields empty", places._cuisine_for({}), "")
+
+    # --- dedupe and rank --------------------------------------------------
+    rows = [
+        {"name": "Tsui Wah Restaurant", "phone": None, "cuisine": "", "area": "Central"},
+        {"name": "tsui wah restaurant", "phone": "+85225252468", "cuisine": "Cantonese", "area": "Central"},
+        {"name": "Tsui  Wah   Restaurant", "phone": None, "cuisine": "", "area": ""},
+        {"name": "Kau Kee", "phone": None, "cuisine": "noodles", "area": "Sheung Wan"},
+    ]
+    ranked = places.dedupe_and_rank(rows)
+    s.eq("three spellings of one chain collapse to one row", len(ranked), 2)
+    s.eq("the collision keeps the copy that has a phone",
+         next(r for r in ranked if "tsui" in r["name"].lower())["phone"], "+85225252468")
+    s.eq("callable rows sort first", bool(ranked[0]["phone"]), True)
+
+    only_cuisine = places.dedupe_and_rank([
+        {"name": "X", "phone": None, "cuisine": "", "area": ""},
+        {"name": "x", "phone": None, "cuisine": "Thai", "area": ""},
+    ])
+    s.eq("with no phone either way, the richer row wins", only_cuisine[0]["cuisine"], "Thai")
+    s.eq("rows with no name are dropped",
+         len(places.dedupe_and_rank([{"name": "", "phone": "+85225252468"}])), 0)
+
+    # --- element parsing --------------------------------------------------
+    s.eq("a place with no coordinates is dropped",
+         places._row_from_element({"type": "node", "id": 1, "tags": {"name": "Nowhere"}}), None)
+    s.eq("a place with no name is dropped",
+         places._row_from_element({"type": "node", "id": 1, "lat": 22.28, "lon": 114.15, "tags": {}}), None)
+    row = places._row_from_element({
+        "type": "way", "id": 42, "center": {"lat": 22.2820, "lon": 114.1580},
+        "tags": {"name": "Test Place", "contact:phone": "2527 2343", "cuisine": "thai"},
+    })
+    s.eq("way centre coordinates are accepted", row["area"], "Central")
+    s.eq("contact:phone is read as well as phone", row["phone"], "+85225272343")
+    s.eq("osm id is recorded for provenance", row["osm_id"], "way/42")
+
+    # --- the three-layer ladder ------------------------------------------
+    elements = [
+        {"type": "node", "id": 1, "lat": 22.2820, "lon": 114.1580,
+         "tags": {"name": "Live Place", "phone": "+852 2527 2343", "cuisine": "thai"}},
+        {"type": "node", "id": 2, "lat": 22.2860, "lon": 114.1500,
+         "tags": {"name": "Another Live", "cuisine": "japanese"}},
+    ]
+    original_cache = places.CACHE_PATH
+    places.CACHE_PATH = Path(__file__).resolve().parent / "_test_cache.json"
+    try:
+        with FakeNet([overpass_ok(elements), overpass_ok([]), overpass_ok([])]):
+            live = places.search_places()
+        s.eq("layer 1: live Overpass is used", live[0]["name"], "Live Place")
+        s.check("layer 1 writes the cache for later", places.CACHE_PATH.exists())
+
+        # Overpass tries two endpoints per box and three boxes: six failures.
+        with FakeNet([url_error()] * 6, strict=False):
+            cached = places.search_places()
+        s.eq("layer 2: Overpass down falls back to the cache", cached[0]["name"], "Live Place")
+        s.check("layer 2 rows are still callable", bool(cached[0]["phone"]))
+
+        places.CACHE_PATH.unlink()
+        with FakeNet([timeout_error()] * 6, strict=False):
+            seeded = places.search_places()
+        s.check("layer 3: no network and no cache still returns names", len(seeded) > 0)
+        s.eq("layer 3 invents zero phone numbers",
+             sum(1 for r in seeded if r.get("phone")), 0)
+        s.check("seed rows are labelled as seed", all(r.get("source") == "seed" for r in seeded))
+
+        places.CACHE_PATH.write_text("{ this is not json", encoding="utf-8")
+        s.eq("a corrupt cache reads as empty rather than crashing", places.read_cache(), [])
+    finally:
+        if places.CACHE_PATH.exists():
+            places.CACHE_PATH.unlink()
+        places.CACHE_PATH = original_cache
+
+    # --- helpers ----------------------------------------------------------
+    pool = [{"name": "Samsen Wanchai", "phone": "+85228033960"}, {"name": "Chom Chom", "phone": None}]
+    s.eq("callable_only filters to dialable rows", len(places.callable_only(pool)), 1)
+    s.eq("find_by_name matches exactly", places.find_by_name(pool, "Samsen Wanchai")["phone"], "+85228033960")
+    s.eq("find_by_name matches case and spacing insensitively",
+         places.find_by_name(pool, "samsen  wanchai")["phone"], "+85228033960")
+    s.eq("find_by_name matches a partial", places.find_by_name(pool, "Samsen")["name"], "Samsen Wanchai")
+    s.eq("find_by_name returns None for a stranger", places.find_by_name(pool, "Nowhere At All"), None)
+    s.eq("find_by_name on empty input is None", places.find_by_name(pool, ""), None)
+
+    # --- the query --------------------------------------------------------
+    query = places.build_query(places.AREAS["hk_island_north"])
+    s.contains("query asks for restaurants and fast food", query, "restaurant|fast_food")
+    s.contains("query requires a name tag", query, '["name"]')
+    s.contains("query returns tags and centres", query, "out center tags")
+    s.check("query carries a timeout so it cannot hang forever", "timeout:" in query)
+
+    s.check("all district boxes are well formed",
+            all(s0 < n0 and w0 < e0 for _, s0, w0, n0, e0 in places.DISTRICTS))
+    s.check("all area boxes are well formed",
+            all(b[0] < b[2] and b[1] < b[3] for b in places.AREAS.values()))
+    return s
