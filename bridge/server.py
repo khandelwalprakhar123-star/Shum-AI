@@ -167,7 +167,7 @@ def archive_call(pending: dict, body: dict) -> Path:
 # --------------------------------------------------------------------------
 
 class Handler(BaseHTTPRequestHandler):
-    server_version = "DinnerBotBridge/1.0"
+    server_version = "ShumAIBridge/1.0"
 
     # Only needed by the optional CopilotKit console on :3000. Missing CORS
     # headers surface as a bare "Failed to fetch" with no explanation at all
@@ -222,7 +222,7 @@ class Handler(BaseHTTPRequestHandler):
         if route in ("/", "/index.html", "/call_page.html"):
             self._file(HERE / "call_page.html", "text/html; charset=utf-8")
         elif route == "/health":
-            self._json({"ok": True, "service": "dinner-bot-bridge", "port": PORT})
+            self._json({"ok": True, "service": "shum-ai-bridge", "port": PORT})
         elif route == "/config":
             agent_id = env("ELEVENLABS_AGENT_ID")
             self._json(

@@ -448,7 +448,7 @@ def handle_callback(tg: Telegram, query: dict) -> None:
 # ===========================================================================
 
 HELP = (
-    "<b>Dinner Bot</b>\n\n"
+    "<b>Shum-AI</b>\n\n"
     "I read this chat, pull out the constraints you've already agreed on, find three places "
     "that fit, run a poll — and once one of you approves, I <b>phone the restaurant</b> "
     "with a voice agent and book it.\n\n"

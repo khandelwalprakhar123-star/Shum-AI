@@ -1,6 +1,8 @@
-# Dinner Bot
+# Shum-AI
 
 **An agent that lives in your friends' group chat, reads the argument, and then actually phones the restaurant.**
+
+*Shumai* (燒賣) is the dumpling nobody argues about at a Hong Kong dim sum table. Everything else, they argue about — which is the problem this solves.
 
 Built at the AI Tinkerers *Agents, Everywhere* global hackathon — Hong Kong site, Cyberport, 12 September 2026.
 
@@ -110,7 +112,7 @@ Not optional polish. These are the difference between a good demo and an irrespo
 ## Setup
 
 ```bash
-git clone <this repo> && cd dinner-bot
+git clone https://github.com/khandelwalprakhar123-star/Shum-AI && cd Shum-AI
 cp .env.example .env      # then fill it in
 ```
 

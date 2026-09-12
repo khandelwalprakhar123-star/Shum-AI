@@ -182,7 +182,7 @@ def _fetch_overpass(query: str) -> list[dict]:
         try:
             req = urllib.request.Request(
                 endpoint, data=payload,
-                headers={"User-Agent": "dinner-bot/1.0 (AI Tinkerers hackathon; contact via repo)"},
+                headers={"User-Agent": "Shum-AI/1.0 (AI Tinkerers hackathon; contact via repo)"},
             )
             with urllib.request.urlopen(req, timeout=TIMEOUT) as resp:
                 return (json.loads(resp.read().decode("utf-8")) or {}).get("elements") or []
