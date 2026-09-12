@@ -34,7 +34,7 @@ GOOD = {
 
 
 def run() -> Suite:
-    s = Suite("pipeline", expect_at_least=78)
+    s = Suite("pipeline", expect_at_least=92)
     os.environ["GEMINI_API_KEY"] = "AQ.test-key-not-real"
     os.environ.pop("OPENROUTER_API_KEY", None)
 
@@ -365,6 +365,37 @@ def run() -> Suite:
     s.contains("and gives the exact phrasings that fooled it",
                pipeline.EXTRACT_PROMPT, "im vegetarian")
     s.contains("and says what SOFT is actually for", pipeline.EXTRACT_PROMPT, "genuine wants")
+
+    # --- a booking time has to be a real time ----------------------------
+    # "this evening" is TRUTHY, so it sailed through the `if not when_text`
+    # guard and would have had the agent asking a restaurant to hold a table
+    # at an hour it never named. Refusing to invent a time was the first fix;
+    # refusing to accept a vague one is this fix.
+    for good in ["today at 2 pm", "friday at 8pm", "8:30pm", "20:30", "sat 7pm",
+                 "eight o'clock", "8 o'clock", "noon", "tomorrow at 19:45"]:
+        s.check(f"bookable: {good!r}", pipeline.time_is_bookable(good)[0])
+    for bad in ["this evening", "tonight", "later", "lunchtime", "after work",
+                "friday", "tomorrow", "soon", "", "dinner time"]:
+        ok, why = pipeline.time_is_bookable(bad)
+        s.check(f"NOT bookable: {bad!r}", not ok)
+        s.check(f"and it says why for {bad!r}", bool(why))
+
+    s.contains("a vague word is called out as not-a-time",
+               pipeline.time_is_bookable("this evening")[1], "hold a table")
+    s.contains("a bare day is called out as having no clock time",
+               pipeline.time_is_bookable("friday")[1], "no clock time")
+
+    # The answer parser must drop a vague reply rather than bank it.
+    s.eq("a vague reply is not accepted as the time",
+         pipeline.keyword_answer("this evening", ["when_text"])["when_text"], None)
+    s.eq("nor is a bare day",
+         pipeline.keyword_answer("friday", ["when_text"])["when_text"], None)
+    s.eq("an exact reply still lands",
+         pipeline.keyword_answer("friday at 8pm", ["when_text"])["when_text"], "friday at 8pm")
+
+    # And the extractor is told not to volunteer one.
+    s.contains("the prompt forbids a vague when_text", pipeline.EXTRACT_PROMPT, "CLOCK TIME")
+    s.contains("naming the exact words that fooled it", pipeline.EXTRACT_PROMPT, "this evening")
 
     # --- HTML escaping --------------------------------------------------
     # render_constraints is the single most exposed message in the project

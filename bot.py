@@ -429,8 +429,8 @@ def handle_close(tg: Telegram, chat_id: int, state: ChatState) -> None:
 
 
 QUESTION_LABELS = {
-    "party_size": "how many of you there are",
-    "when_text": "what time",
+    "party_size": "exactly how many of you there are",
+    "when_text": "exactly what time",
 }
 
 
@@ -450,8 +450,23 @@ def present_booking(tg: Telegram, chat_id: int, state: ChatState) -> None:
 
     party = state.constraints.get("party_size")
     when_text = state.constraints.get("when_text")
-    missing = [field for field, value in (("party_size", party), ("when_text", when_text))
-               if not value]
+
+    missing = []
+    vague_reason = ""
+    if not party:
+        missing.append("party_size")
+    if not when_text:
+        missing.append("when_text")
+    else:
+        # Truthy is not good enough. "this evening" sailed through a `if not
+        # when_text` check and would have had the agent asking a restaurant to
+        # hold a table at an hour it never named. A booking without a clock
+        # time is not a booking, so a vague answer counts as missing.
+        bookable, why = pipeline.time_is_bookable(when_text)
+        if not bookable:
+            missing.append("when_text")
+            vague_reason = why
+            state.constraints["when_text"] = None
 
     if missing:
         # Ask, and hold the thread. The next ordinary message in the chat is
@@ -459,12 +474,14 @@ def present_booking(tg: Telegram, chat_id: int, state: ChatState) -> None:
         state.awaiting = {"fields": missing, "asked_at": datetime.now(timezone.utc).isoformat()}
         save_state()
         asked = " and ".join(QUESTION_LABELS[field] for field in missing)
+        note = (f"\n\n{esc(vague_reason)} \u2014 a restaurant needs a clock time."
+                if vague_reason else "")
         tg.send(
             chat_id,
             f"🏆 <b>{esc(winner['name'])}</b> wins.\n<i>{tally}</i>\n\n"
-            f"Before I call them — <b>{asked}?</b>\n\n"
-            "<i>Just say it here and I'll carry on. I won't guess: the agent would "
-            "be saying a made-up number down the phone.</i>"
+            f"Before I call them — <b>{asked}?</b>{note}\n\n"
+            "<i>Just say it here and I'll carry on. A restaurant can't hold a table "
+            "for a vague answer, and I'm not going to guess one down the phone.</i>"
         )
         return
 
@@ -703,9 +720,12 @@ def try_answer(tg: Telegram, chat_id: int, state: ChatState, text: str, author: 
     got: list[str] = []
     for field in needed:
         value = answer.get(field)
-        if value:
-            state.constraints[field] = value
-            got.append(field)
+        if not value:
+            continue
+        if field == "when_text" and not pipeline.time_is_bookable(value)[0]:
+            continue        # parse_answer already filters, this is belt and braces
+        state.constraints[field] = value
+        got.append(field)
 
     if not got:
         # Silence is correct here. They may simply be still talking.

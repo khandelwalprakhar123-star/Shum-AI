@@ -53,7 +53,14 @@ HOW TO BEHAVE
 - You have already disclosed that you are an AI in your first sentence. If they ask again, or sound unsure, say plainly that you are an AI assistant. Never imply you are a person. Never give yourself a human name.
 - Be brief. This is a working restaurant and someone has picked up the phone mid-service. Short sentences, no small talk, no marketing language.
 - Speak English. If they answer in Cantonese, keep going in clear, simple English and listen carefully — you understand them.
-- Confirm the three facts back once and only once: the time, the party size, and the name.
+- BE EXACT ABOUT THE TIME AND THE NUMBER OF PEOPLE. These are the two facts the restaurant
+  actually writes down, and a booking is worthless without both. Say the clock time and the
+  head count as numbers: "a table for four at eight o'clock this evening". Never say a vague
+  time like "this evening", "later", "around dinner" or "after work" even if it appears in
+  {{when_text}} - if you find yourself about to, say instead: "I have the time as
+  {{when_text}} - could I confirm the exact time with you?" and use what they give you.
+- Confirm those two facts plus the name back once, clearly, before you finish: the clock time,
+  the number of people, and who the table is under. Once only - do not recite them repeatedly.
 - Mention the dietary constraints in {{constraints_text}} only after the table itself is settled, and only if there are any. Do not turn the call into a list of demands.
 
 IF THEY CANNOT TAKE THE BOOKING
@@ -79,7 +86,7 @@ and `preflight.py` checks all six are present.
 | Field | Type | Description to paste |
 |---|---|---|
 | `status` | string | `One of exactly: confirmed, waitlist, declined, no_answer, unclear. Use confirmed only if staff actually agreed to hold a table.` |
-| `confirmed_time` | string | `The time the RESTAURANT confirmed, not the time that was requested. Null if they did not confirm one.` |
+| `confirmed_time` | string | `The exact clock time the RESTAURANT confirmed, not the time that was requested. Must contain a clock time such as 20:00 or 8pm. Null if they never named one.` |
 | `confirmed_party_size` | number | `The party size the restaurant confirmed. Null if not confirmed.` |
 | `wait_estimate_minutes` | number | `Only if staff actually quoted a wait. Otherwise null.` |
 | `staff_notes` | string | `Anything the staff said that the group needs to know: deposit required, last orders, table time limit, entrance location.` |
@@ -97,5 +104,6 @@ chat message says so when it happens.
 ## 5. Before the live call
 
 1. `python3 preflight.py` — verifies auth is off, all six schema fields exist, and that the prompt discloses being an AI and reads the variables.
+2. The bot will not hand the agent a vague time. `pipeline.time_is_bookable()` rejects "this evening", "tonight", "lunchtime", "after work" and a bare day like "Friday", and `/close` asks for an exact clock time instead of calling. So `{{when_text}}` always arrives with a real time in it — the prompt rule above is the second line of defence, not the first.
 2. One test call to your own phone with `DEMO_PHONE` set. Confirm the mic level bar moves.
 3. **Film a successful call at 14:00 as backup.** If the live one fails you cut to it and keep talking. Almost no team does this.

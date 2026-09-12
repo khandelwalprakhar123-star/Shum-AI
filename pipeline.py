@@ -337,6 +337,11 @@ Rules:
 - A dish rejected two or more separate times is a veto, even if nobody used the word.
 - "coming from X" is a travel constraint, not a location preference. Record the origin, not a district to search.
 - If the group never said how many people or when, leave those null. Do not invent them.
+- when_text must contain an actual CLOCK TIME, because it gets said to a restaurant on the
+  phone. "8pm", "8:30pm", "friday at 8pm", "today at 2pm" are all fine. "this evening",
+  "tonight", "after work", "lunchtime", "friday" and "tomorrow" are NOT: they name a mood or a
+  date, not a slot a table can be held for. If the group only said something vague, leave
+  when_text null and put the question in open_questions.
 
 ALREADY ESTABLISHED about these people from earlier conversations. Treat this as true unless
 this chat contradicts it, and carry it into your answer with the ORIGINAL quote where you have
@@ -1017,8 +1022,51 @@ def keyword_answer(text: str, needed: list[str]) -> dict:
     if "when_text" in needed:
         found = re.search(_TIME_PATTERN, low)
         if found:
-            out["when_text"] = " ".join(found.group(1).split())
+            candidate = " ".join(found.group(1).split())
+            if time_is_bookable(candidate)[0]:
+                out["when_text"] = candidate
     return out
+
+
+# A restaurant cannot hold a table for "this evening". It needs a clock time
+# and a head count, and both have to be said out loud on the call.
+#
+# The earlier fix refused to INVENT a time. This one refuses to accept a vague
+# one: "this evening" is truthy, so it sailed straight through a `if not
+# when_text` check and would have had the agent asking for a table at an hour
+# it never named. A booking made at an unspecified time is not a booking.
+_CLOCK_COMPONENT = re.compile(
+    r"\b\d{1,2}\s*(?::\s*\d{2})?\s*(?:am|pm)\b"      # 8pm, 8:30 pm
+    r"|\b\d{1,2}\s*:\s*\d{2}\b"                        # 20:30, 8:30
+    r"|\b\d{1,2}\s*o'?\s*clock\b"                        # 8 o'clock
+    r"|\b(?:one|two|three|four|five|six|seven|eight|nine|ten|eleven|twelve)"
+    r"\s*o'?\s*clock\b"                                  # eight o'clock
+    r"|\b(?:noon|midday|midnight)\b",
+    re.I,
+)
+# Words that feel like a time and are not one.
+_VAGUE_TIME = re.compile(
+    r"\b(?:this\s+)?(?:evening|morning|afternoon|night|tonight|later|soon|"
+    r"lunch(?:time)?|dinner(?:time)?|brunch|breakfast|after\s+work|sometime|"
+    r"whenever|asap|early|late)\b",
+    re.I,
+)
+
+
+def time_is_bookable(when_text: str) -> tuple[bool, str]:
+    """Can this be said to a restaurant as a booking time?
+
+    Returns (ok, why_not). A day on its own is not enough either: "Friday" and
+    "tomorrow" name a date, not a slot.
+    """
+    text = " ".join((when_text or "").split())
+    if not text:
+        return False, "no time at all"
+    if _CLOCK_COMPONENT.search(text):
+        return True, ""
+    if _VAGUE_TIME.search(text):
+        return False, f"\u201c{text}\u201d is not a time a restaurant can hold a table for"
+    return False, f"\u201c{text}\u201d has no clock time in it"
 
 
 def parse_answer(text: str, needed: list[str]) -> dict:
@@ -1040,10 +1088,15 @@ def parse_answer(text: str, needed: list[str]) -> dict:
     )
     try:
         parsed, _ = _generate(prompt)
+        proposed_when = (str(parsed["when_text"]).strip()
+                         if "when_text" in needed and parsed.get("when_text") else None)
+        # A vague answer is not an answer. Dropping it here means the bot asks
+        # again rather than carrying "this evening" onto a phone call.
+        if proposed_when and not time_is_bookable(proposed_when)[0]:
+            proposed_when = None
         out = {
             "party_size": _clean_int(parsed.get("party_size")) if "party_size" in needed else None,
-            "when_text": (str(parsed["when_text"]).strip()
-                          if "when_text" in needed and parsed.get("when_text") else None),
+            "when_text": proposed_when,
         }
         # A model that answers neither is no better than the regex, so try it.
         if out["party_size"] or out["when_text"]:

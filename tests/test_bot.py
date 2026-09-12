@@ -62,7 +62,7 @@ SUITE_PEOPLE = Path(__file__).resolve().parent / "_test_suite_people.json"
 
 
 def run() -> Suite:
-    s = Suite("bot", expect_at_least=94)
+    s = Suite("bot", expect_at_least=100)
     bot.PENDING_PATH = TMP_PENDING
     # notify_bridge_dial makes a real POST to localhost:8080. Stub it, and
     # exercise both branches deliberately further down rather than letting a
@@ -275,7 +275,7 @@ def run() -> Suite:
          st.awaiting["fields"], ["party_size"])
     s.check("no approval card yet", not any(
         "inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg.calls))
-    s.contains("it says why it will not guess", tg.sent_text(), "made-up number")
+    s.contains("it says why it will not guess", tg.sent_text(), "not going to guess")
     s.check("it does NOT tell the group to re-run a command",
             "/decide" not in tg.sent_text() and "/close" not in tg.sent_text())
 
@@ -287,6 +287,21 @@ def run() -> Suite:
     s.eq("both missing are asked together", st.awaiting["fields"], ["party_size", "when_text"])
     s.contains("in one question", tg.sent_text(), "how many of you")
     s.contains("covering both", tg.sent_text(), "what time")
+
+    # A vague time must be treated as MISSING, not accepted.
+    st, tg = closed_with({"party_size": 4, "when_text": "this evening", "hard": []})
+    s.eq("'this evening' counts as no time at all", st.awaiting["fields"], ["when_text"])
+    s.contains("and the chat is told why", tg.sent_text(), "clock time")
+    s.contains("quoting what it rejected", tg.sent_text(), "this evening")
+    s.check("no approval card for a vague time", not any(
+        "inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg.calls))
+    s.eq("the vague value is cleared rather than left to leak onto the call",
+         st.constraints.get("when_text"), None)
+
+    st, tg = closed_with({"party_size": 4, "when_text": "friday at 8pm", "hard": []})
+    s.eq("an exact time passes straight through", st.awaiting, None)
+    s.check("and produces the card", any(
+        "inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg.calls))
 
     # --- and an ordinary reply answers it ---------------------------------
     import pipeline as pl3
