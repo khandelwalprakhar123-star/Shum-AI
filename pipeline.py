@@ -83,6 +83,8 @@ CANDIDATES_SENTINEL = "@@CANDIDATES@@"
 CONSTRAINTS_SENTINEL = "@@CONSTRAINTS@@"
 TRANSCRIPT_SENTINEL = "@@TRANSCRIPT@@"
 KNOWN_SENTINEL = "@@KNOWN_PEOPLE@@"
+ANSWER_SENTINEL = "@@ANSWER@@"
+NEEDED_SENTINEL = "@@NEEDED@@"
 
 
 class ModelUnavailable(RuntimeError):
@@ -933,3 +935,113 @@ def extract_call_outcome(transcript: list[dict]) -> dict:
                          if parsed.get("booking_name") else None),
         "staff_notes": str(parsed.get("staff_notes") or "").strip()[:300],
     }
+
+
+# ---------------------------------------------------------------------------
+# 4. Answering a follow-up question
+# ---------------------------------------------------------------------------
+
+ANSWER_PROMPT = """Someone was asked a direct question in a group chat and this is their reply.
+Pull out ONLY what they actually answered.
+
+You were waiting for: @@NEEDED@@
+
+Rules:
+- If they did not answer one of those, leave it null. Do not guess and do not carry over the
+  question's own wording as if it were the answer.
+- party_size is the number of PEOPLE eating. "just the 2 of us", "me and Kai", "the four of
+  us" and "table for 4" are all 4/2/4/4 respectively. A number of hours or a time is not a
+  party size.
+- when_text is what a person would say aloud on the phone: "2pm today", "Friday at 8",
+  "tomorrow lunchtime". Keep their words; do not convert to a date.
+
+Return ONLY this JSON shape:
+{"party_size": null, "when_text": null}
+
+THEIR REPLY:
+@@ANSWER@@
+"""
+
+# Regex fallback for the common shapes, so a reply can be understood with no
+# key and no network. "just the 2 of us" is the phrasing a model handles easily
+# and a naive \d+ regex gets wrong by matching the time instead.
+_PARTY_PATTERNS = [
+    r"\b(?:just|only)?\s*(?:the\s+)?(\d{1,2})\s*(?:of us|people|persons?|pax|heads|guests)\b",
+    r"\b(?:table|booking|reservation)\s+for\s+(\d{1,2})\b",
+    r"\b(?:we(?:'re| are)|there(?:'s| are)|party of|group of|book for)\s+(\d{1,2})\b",
+    r"^\s*(\d{1,2})\s*$",
+]
+_WORD_NUMBERS = {
+    "one": 1, "two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+    "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+}
+# Matches a time with its day either side of it. The first version only
+# handled day-then-time ("today 2pm") and so read "2pm today" as just "2pm",
+# dropping the day -- which matters, because this string is what the agent
+# says out loud on the phone.
+_DAY_WORDS = (r"(?:to(?:night|morrow|day)|this (?:evening|afternoon|morning)|"
+              r"(?:mon|tue|tues|wed|thu|thur|thurs|fri|sat|sun)[a-z]*)")
+_CLOCK = r"\d{1,2}(?::\d{2})?\s*(?:am|pm)?"
+_TIME_PATTERN = (
+    r"\b("
+    + _DAY_WORDS + r"(?:\s+(?:at|around|about))?\s*" + _CLOCK      # today at 2pm
+    + r"|\d{1,2}(?::\d{2})?\s*(?:am|pm)(?:\s+" + _DAY_WORDS + r")?"  # 2pm today
+    + r"|\d{1,2}(?::\d{2})?\s*o'?clock"
+    + r")"
+)
+
+
+def keyword_answer(text: str, needed: list[str]) -> dict:
+    """Parse a follow-up reply with regex only."""
+    low = " ".join((text or "").lower().split())
+    out: dict = {"party_size": None, "when_text": None}
+
+    if "party_size" in needed:
+        for pattern in _PARTY_PATTERNS:
+            found = re.search(pattern, low)
+            if found:
+                out["party_size"] = _clean_int(found.group(1))
+                break
+        if out["party_size"] is None:
+            for word, value in _WORD_NUMBERS.items():
+                if re.search(r"\b(?:just |only )?(?:the )?" + word + r"\s+(?:of us|people|pax)\b", low):
+                    out["party_size"] = value
+                    break
+
+    if "when_text" in needed:
+        found = re.search(_TIME_PATTERN, low)
+        if found:
+            out["when_text"] = " ".join(found.group(1).split())
+    return out
+
+
+def parse_answer(text: str, needed: list[str]) -> dict:
+    """Read a reply to a follow-up question. Model first, regex as backup.
+
+    Kept separate from extract_constraints on purpose. This is answering ONE
+    direct question about ONE message, so handing the model the whole 200-line
+    history would invite it to "find" a party size someone mentioned last week
+    and present it as today's answer.
+    """
+    text = (text or "").strip()
+    if not text or not needed:
+        return {"party_size": None, "when_text": None}
+
+    prompt = (
+        ANSWER_PROMPT
+        .replace(ANSWER_SENTINEL, text[:600])
+        .replace(NEEDED_SENTINEL, ", ".join(needed))
+    )
+    try:
+        parsed, _ = _generate(prompt)
+        out = {
+            "party_size": _clean_int(parsed.get("party_size")) if "party_size" in needed else None,
+            "when_text": (str(parsed["when_text"]).strip()
+                          if "when_text" in needed and parsed.get("when_text") else None),
+        }
+        # A model that answers neither is no better than the regex, so try it.
+        if out["party_size"] or out["when_text"]:
+            return out
+    except ModelUnavailable:
+        pass
+    return keyword_answer(text, needed)

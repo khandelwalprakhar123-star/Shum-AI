@@ -116,6 +116,11 @@ class ChatState:
         self.deciding = False
         self.approval_token: str | None = None
         self.approval_payload: dict | None = None
+        # A question the bot has asked and is waiting on. Telling people to
+        # "run /decide again" put the work back on them for something the bot
+        # could simply ask about; this is the bot holding the thread instead.
+        self.awaiting: dict | None = None
+        self.pending_winner: dict | None = None
 
     def add(self, author: str, text: str) -> None:
         """Store one message, splitting multi-line into separate history lines.
@@ -166,6 +171,8 @@ def save_state() -> None:
                 "voter_names": {str(k): v for k, v in st.voter_names.items()},
                 "approval_token": st.approval_token,
                 "approval_payload": st.approval_payload,
+                "awaiting": st.awaiting,
+                "pending_winner": st.pending_winner,
             }
             for chat_id, st in STATE.items()
         }
@@ -206,6 +213,8 @@ def load_state() -> int:
         st.voter_names = {int(k): v for k, v in (data.get("voter_names") or {}).items() if str(k).lstrip("-").isdigit()}
         st.approval_token = data.get("approval_token")
         st.approval_payload = data.get("approval_payload")
+        st.awaiting = data.get("awaiting")
+        st.pending_winner = data.get("pending_winner")
         restored += len(st.history)
     return restored
 
@@ -257,6 +266,8 @@ def resolve_dial_target(real_phone: str | None) -> tuple[str | None, bool, str |
 # ===========================================================================
 
 def handle_decide(tg: Telegram, chat_id: int, state: ChatState) -> None:
+    state.awaiting = None
+    state.pending_winner = None
     if state.deciding:
         tg.send(chat_id, "Already working on it — give me a few seconds.")
         return
@@ -398,6 +409,9 @@ def handle_close(tg: Telegram, chat_id: int, state: ChatState) -> None:
         tg.send(chat_id, "“None of these” won. Keep talking and run /decide again — "
                          "I'll re-read the chat and try different places.")
         state.poll_id = None
+        state.pending_winner = None
+        state.awaiting = None
+        save_state()
         return
 
     if not any(counts):
@@ -408,45 +422,62 @@ def handle_close(tg: Telegram, chat_id: int, state: ChatState) -> None:
     tally = " · ".join(
         f"{state.picks[i]['name'][:18]} {counts[i]}" for i in range(min(len(state.picks), len(counts)))
     )
+    state.pending_winner = {"winner": winner, "tally": tally}
+    save_state()
+    present_booking(tg, chat_id, state)
 
-    # NEVER invent these. Defaulting to "party of 4, this evening" meant the
-    # voice agent would say a made-up time out loud to a real restaurant, and
-    # nobody in the group would know it had been guessed. If the conversation
-    # did not settle it, the conversation is where it gets settled - so ask
-    # there rather than filling the gap silently.
+
+QUESTION_LABELS = {
+    "party_size": "how many of you there are",
+    "when_text": "what time",
+}
+
+
+def present_booking(tg: Telegram, chat_id: int, state: ChatState) -> None:
+    """Show the approval card, or ask for whatever is still missing.
+
+    Called from /close and again from an ordinary reply once the missing
+    details arrive, so answering a question in the chat carries straight on to
+    the booking rather than making anyone re-run a command.
+    """
+    held = state.pending_winner or {}
+    winner = held.get("winner")
+    tally = held.get("tally", "")
+    if not winner:
+        tg.send(chat_id, "Nothing to book — run /decide first.")
+        return
+
     party = state.constraints.get("party_size")
     when_text = state.constraints.get("when_text")
+    missing = [field for field, value in (("party_size", party), ("when_text", when_text))
+               if not value]
 
-    missing = []
-    if not party:
-        missing.append("how many people")
-    if not when_text:
-        missing.append("what time")
     if missing:
+        # Ask, and hold the thread. The next ordinary message in the chat is
+        # treated as the answer -- no command, no repetition.
+        state.awaiting = {"fields": missing, "asked_at": datetime.now(timezone.utc).isoformat()}
+        save_state()
+        asked = " and ".join(QUESTION_LABELS[field] for field in missing)
         tg.send(
             chat_id,
-            "\U0001f3c6 <b>" + winner["name"] + "</b> wins.\n<i>" + tally + "</i>\n\n"
-            "<b>I won't call yet \u2014 the chat never settled "
-            + " or ".join(missing) + ".</b>\n\n"
-            "I'm not going to guess and have the agent say a made-up number down the "
-            "phone. Say it here, then run /decide and /close again \u2014 I'll read it "
-            "straight off the chat."
+            f"🏆 <b>{winner['name']}</b> wins.\n<i>{tally}</i>\n\n"
+            f"Before I call them — <b>{asked}?</b>\n\n"
+            "<i>Just say it here and I'll carry on. I won't guess: the agent would "
+            "be saying a made-up number down the phone.</i>"
         )
         return
 
-    dial_number, demo_override, refusal = resolve_dial_target(winner.get("phone"))
+    state.awaiting = None
     hard_list = [h["constraint"] for h in state.constraints.get("hard", []) if h.get("constraint")]
+    dial_number, demo_override, refusal = resolve_dial_target(winner.get("phone"))
 
     if refusal:
-        # Refusing to dial is not the same as having nothing to offer. If the
-        # venue publishes a booking page, hand that over -- the honest fallback
-        # the whole industry actually uses is link handoff.
         extra = ""
         if winner.get("website"):
-            extra = (f"\n\n\U0001f517 They do have a booking page though:\n"
+            extra = (f"\n\n🔗 They do have a booking page though:\n"
                      f"{winner['website']}\n\n"
                      "<i>Someone will have to book it there by hand.</i>")
-        tg.send(chat_id, f"\U0001f3c6 <b>{winner['name']}</b> wins.\n<i>{tally}</i>\n\n{refusal}{extra}")
+        tg.send(chat_id, f"🏆 <b>{winner['name']}</b> wins.\n<i>{tally}</i>\n\n{refusal}{extra}")
         return
 
     token = uuid.uuid4().hex[:12]
@@ -544,6 +575,9 @@ def handle_callback(tg: Telegram, query: dict) -> None:
         tg.call("answerCallbackQuery", callback_query_id=query["id"], text="Cancelled.")
         state.approval_token = None
         state.approval_payload = None
+        state.awaiting = None
+        state.pending_winner = None
+        save_state()
         PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
         PENDING_PATH.write_text(json.dumps({"status": "cancelled"}, indent=2), encoding="utf-8")
         tg.send(chat_id, f"❌ {who} cancelled. Nothing was dialled.")
@@ -611,6 +645,9 @@ def handle_message(tg: Telegram, message: dict) -> None:
     if not command:
         state.add(author, text)
         save_state()
+        # If the bot asked a question, this message is very likely the answer.
+        if state.awaiting:
+            try_answer(tg, chat_id, state, text, author)
         return
 
     verb = command.group(1).lower()
@@ -644,6 +681,53 @@ def handle_message(tg: Telegram, message: dict) -> None:
     else:
         state.add(author, text)
         save_state()
+
+
+def try_answer(tg: Telegram, chat_id: int, state: ChatState, text: str, author: str) -> None:
+    """Treat an ordinary message as the answer to the question just asked.
+
+    Deliberately forgiving. If the reply answers only half the question, the
+    half that landed is kept and the bot asks for the rest, rather than
+    discarding a good answer because the other one was missing. And if the
+    reply is clearly about something else, nothing is said at all -- a bot that
+    interrupts every message with "sorry, I didn't understand" is worse than
+    one that waits.
+    """
+    needed = list((state.awaiting or {}).get("fields") or [])
+    if not needed:
+        state.awaiting = None
+        return
+
+    answer = pipeline.parse_answer(text, needed)
+    got: list[str] = []
+    for field in needed:
+        value = answer.get(field)
+        if value:
+            state.constraints[field] = value
+            got.append(field)
+
+    if not got:
+        # Silence is correct here. They may simply be still talking.
+        return
+
+    still = [field for field in needed if field not in got]
+    state.awaiting = {"fields": still, "asked_at": (state.awaiting or {}).get("asked_at")} if still else None
+    save_state()
+
+    said = []
+    if "party_size" in got:
+        said.append(f"party of <b>{state.constraints['party_size']}</b>")
+    if "when_text" in got:
+        said.append(f"<b>{state.constraints['when_text']}</b>")
+    tg.send(chat_id, f"Got it \u2014 {', '.join(said)}. Thanks {author}.")
+
+    if still:
+        asked = " and ".join(QUESTION_LABELS[field] for field in still)
+        tg.send(chat_id, f"Still need <b>{asked}</b>?")
+        return
+
+    # Everything settled: carry straight on to the booking card.
+    present_booking(tg, chat_id, state)
 
 
 def handle_poll_answer(answer: dict) -> None:

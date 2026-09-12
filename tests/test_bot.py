@@ -62,7 +62,7 @@ SUITE_PEOPLE = Path(__file__).resolve().parent / "_test_suite_people.json"
 
 
 def run() -> Suite:
-    s = Suite("bot", expect_at_least=70)
+    s = Suite("bot", expect_at_least=84)
     bot.PENDING_PATH = TMP_PENDING
     # Redirect persistence for the entire suite. Without this, every handler
     # under test wrote into the project's real chat_state.json and the next
@@ -246,27 +246,93 @@ def run() -> Suite:
     finally:
         pl.extract_constraints, pl.propose, pls.search_places, ex.search = saved
 
-    # --- the booking is never invented -----------------------------------
-    # Defaulting to "party of 4, this evening" had the voice agent saying a
-    # made-up time out loud to a real restaurant, with nobody in the group
-    # aware it had been guessed.
+    # --- it asks, rather than telling you to run a command again ----------
+    # Defaulting to "party of 4, this evening" had the agent saying a made-up
+    # time out loud to a real restaurant. But the first fix told the group to
+    # "run /decide and /close again", which pushes work back onto them for
+    # something the bot can simply ask. Now it asks and holds the thread.
     os.environ["CONSENTED_NUMBERS"] = "+85228519969"
-    for label, constraints, expect in [
-        ("no party size", {"when_text": "Friday 8pm", "hard": []}, "how many people"),
-        ("no time", {"party_size": 6, "hard": []}, "what time"),
-        ("neither", {"hard": []}, "how many people or what time"),
-    ]:
+    os.environ.pop("DEMO_PHONE", None)
+
+    def closed_with(constraints):
         st = seeded_state(None)
-        st.constraints = constraints
+        st.constraints = dict(constraints)
         tg = FakeTelegram({"stopPoll": {"options": [
             {"voter_count": 0}, {"voter_count": 3}, {"voter_count": 0}, {"voter_count": 0}]}})
         bot.handle_close(tg, -100, st)
-        s.contains(f"{label}: says exactly what is missing", tg.sent_text(), expect)
-        s.check(f"{label}: no approval card is offered",
-                not any("inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg.calls))
-        s.check(f"{label}: no booking is written",
-                st.approval_payload is None or st.approval_token is None)
-    s.contains("it tells the group where to fix it", tg.sent_text(), "/decide")
+        return st, tg
+
+    st, tg = closed_with({"when_text": "Friday 8pm", "hard": []})
+    s.contains("missing party size is asked about", tg.sent_text(), "how many of you")
+    s.check("and the time is not asked about again", "what time" not in tg.sent_text())
+    s.eq("the question is recorded so the next message answers it",
+         st.awaiting["fields"], ["party_size"])
+    s.check("no approval card yet", not any(
+        "inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg.calls))
+    s.contains("it says why it will not guess", tg.sent_text(), "made-up number")
+    s.check("it does NOT tell the group to re-run a command",
+            "/decide" not in tg.sent_text() and "/close" not in tg.sent_text())
+
+    st, tg = closed_with({"party_size": 6, "hard": []})
+    s.contains("missing time is asked about", tg.sent_text(), "what time")
+    s.eq("only the time is outstanding", st.awaiting["fields"], ["when_text"])
+
+    st, tg = closed_with({"hard": []})
+    s.eq("both missing are asked together", st.awaiting["fields"], ["party_size", "when_text"])
+    s.contains("in one question", tg.sent_text(), "how many of you")
+    s.contains("covering both", tg.sent_text(), "what time")
+
+    # --- and an ordinary reply answers it ---------------------------------
+    import pipeline as pl3
+    saved3 = pl3.parse_answer
+    pl3.parse_answer = lambda text, needed: pl3.keyword_answer(text, needed)
+    try:
+        st, tg = closed_with({"hard": []})
+        st.winner_for_test = None
+        tg2 = FakeTelegram()
+        bot.try_answer(tg2, -100, st, "just the 2 of us", "Kai")
+        s.eq("a plain reply is understood", st.constraints.get("party_size"), 2)
+        s.contains("and acknowledged", tg2.sent_text(), "party of")
+        s.eq("the half that is still missing is still asked for",
+             st.awaiting["fields"], ["when_text"])
+        s.contains("explicitly", tg2.sent_text(), "Still need")
+        s.check("no card while a question is open", not any(
+            "inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg2.calls))
+
+        tg3 = FakeTelegram()
+        bot.try_answer(tg3, -100, st, "2pm today", "Kai")
+        s.eq("the second half lands too", st.constraints.get("when_text"), "2pm today")
+        s.eq("and the question is closed", st.awaiting, None)
+        s.check("NOW the approval card appears, with no command re-run", any(
+            "inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg3.calls))
+        s.contains("and it carries the answered details", tg3.sent_text(), "2pm today")
+
+        # Both at once should finish in one step.
+        st, tg = closed_with({"hard": []})
+        tg4 = FakeTelegram()
+        bot.try_answer(tg4, -100, st, "table for 4 tomorrow at 7pm", "Dan")
+        s.eq("one reply can answer everything", st.awaiting, None)
+        s.eq("party size from it", st.constraints.get("party_size"), 4)
+        s.check("card straight away", any(
+            "inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg4.calls))
+
+        # An unrelated message must not provoke a reply.
+        st, tg = closed_with({"hard": []})
+        tg5 = FakeTelegram()
+        bot.try_answer(tg5, -100, st, "lol ok whatever", "Dan")
+        s.eq("an unrelated message is answered with silence", tg5.calls, [])
+        s.eq("and the question stays open", st.awaiting["fields"], ["party_size", "when_text"])
+
+        # /decide starts a clean round.
+        st.awaiting = {"fields": ["party_size"]}
+        st.pending_winner = {"winner": {"name": "x"}, "tally": ""}
+        st.history.clear()
+        tg6 = FakeTelegram()
+        bot.handle_decide(tg6, -100, st)
+        s.eq("a fresh /decide clears any open question", st.awaiting, None)
+        s.eq("and drops the held winner", st.pending_winner, None)
+    finally:
+        pl3.parse_answer = saved3
 
     # --- the candidate search follows the chat ----------------------------
     bot.STATE.clear()
