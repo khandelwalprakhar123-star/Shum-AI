@@ -66,6 +66,15 @@ def run() -> Suite:
     # under test wrote into the project's real chat_state.json and the next
     # real bot start restored test chats as if they were a conversation.
     real_state_path = bot.STATE_PATH
+    # Fingerprint the real state file so we can prove afterwards that the suite
+    # did not touch it. Asserting it simply does not EXIST was wrong: a running
+    # bot creates it legitimately, so that check passed only on machines where
+    # the bot had never run, and went red the moment it had.
+    real_state_before = (
+        (real_state_path.exists(),
+         real_state_path.stat().st_mtime_ns if real_state_path.exists() else 0,
+         real_state_path.stat().st_size if real_state_path.exists() else 0)
+    )
     bot.STATE_PATH = SUITE_STATE
     for key in ("DEMO_PHONE", "CONSENTED_NUMBERS", "ALLOW_ANY_NUMBER"):
         os.environ.pop(key, None)
@@ -457,9 +466,14 @@ def run() -> Suite:
     for key in ("DEMO_PHONE", "CONSENTED_NUMBERS", "ALLOW_ANY_NUMBER"):
         os.environ.pop(key, None)
 
-    # The suite must leave no trace in the project directory.
-    s.check("the test run wrote no real chat_state.json",
-            not (Path(__file__).resolve().parent.parent / "chat_state.json").exists(),
-            "tests leaked state into the repo")
+    # The suite must not create or modify the real state file. Whether one
+    # already exists is none of the suite's business.
+    real_state_after = (
+        (real_state_path.exists(),
+         real_state_path.stat().st_mtime_ns if real_state_path.exists() else 0,
+         real_state_path.stat().st_size if real_state_path.exists() else 0)
+    )
+    s.eq("the suite did not create or modify the real chat_state.json",
+         real_state_after, real_state_before)
     s.check("the suite's own temp state file is cleaned up", not SUITE_STATE.exists())
     return s
