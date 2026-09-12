@@ -35,3 +35,7 @@ people.json.tmp
 
 # Debris from a test run that died before its cleanup ran.
 tests/_test_*
+
+# Runtime logs — these contain bot tokens in request URLs.
+logs/
+*.log
