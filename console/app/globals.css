@@ -1,0 +1,168 @@
+/* Shum-AI operator console.
+   Same palette as bridge/call_page.html on purpose: the operator is looking at
+   two windows of one product, and a different accent colour in each reads as
+   two half-finished things. */
+
+:root {
+  --bg: #0b0d10;
+  --bg-soft: #0f1318;
+  --panel: #14181d;
+  --panel-hi: #1a1f26;
+  --line: #232a32;
+  --line-hi: #2e3742;
+  --ink: #e8edf2;
+  --ink-dim: #97a3b1;
+  --ink-faint: #6b7683;
+  --accent: #6ee7a8;
+  --accent-ink: #06110c;
+  --info: #7dd3fc;
+  --warn: #f5b545;
+  --bad: #f06d6d;
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", Inter, sans-serif;
+  --r: 12px;
+}
+
+* { box-sizing: border-box; }
+
+html, body { height: 100%; }
+
+body {
+  margin: 0;
+  background:
+    radial-gradient(1100px 500px at 15% -10%, #131a21 0%, transparent 60%),
+    var(--bg);
+  color: var(--ink);
+  font: 15px/1.55 var(--sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+.shell { display: flex; flex-direction: column; min-height: 100vh; }
+
+/* ---------- header ---------- */
+.top {
+  display: flex; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 16px 22px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(11, 13, 16, 0.85);
+  backdrop-filter: blur(8px);
+  position: sticky; top: 0; z-index: 20;
+}
+.brand { display: flex; align-items: baseline; gap: 10px; margin-right: auto; }
+.brand h1 { font-size: 16px; margin: 0; letter-spacing: -0.01em; font-weight: 650; }
+.brand span { color: var(--ink-faint); font-size: 12.5px; }
+
+/* ---------- layout ---------- */
+.body { display: grid; grid-template-columns: minmax(0, 1fr) 400px; flex: 1; min-height: 0; }
+.left { padding: 22px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.right {
+  border-left: 1px solid var(--line);
+  background: var(--bg-soft);
+  display: flex; flex-direction: column; min-height: 0;
+}
+.right header {
+  padding: 14px 18px; border-bottom: 1px solid var(--line);
+}
+.right header h2 { margin: 0; font-size: 13px; letter-spacing: 0.04em; text-transform: uppercase; color: var(--ink-dim); }
+.right header p { margin: 5px 0 0; font-size: 12.5px; color: var(--ink-faint); }
+.chatwrap { flex: 1; min-height: 0; display: flex; }
+.chatwrap > * { flex: 1; min-height: 0; }
+
+@media (max-width: 1000px) {
+  .body { grid-template-columns: 1fr; }
+  .right { border-left: none; border-top: 1px solid var(--line); min-height: 60vh; }
+}
+
+/* ---------- cards ---------- */
+.card {
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--r);
+  padding: 18px 20px;
+}
+.card > h2 {
+  margin: 0 0 14px;
+  font-size: 11px; font-weight: 650;
+  text-transform: uppercase; letter-spacing: 0.09em;
+  color: var(--ink-dim);
+}
+.card.hero { border-color: var(--line-hi); background: linear-gradient(180deg, var(--panel-hi), var(--panel)); }
+
+.venue { font-size: 25px; font-weight: 660; letter-spacing: -0.02em; margin: 0 0 4px; }
+.venue small { display: block; font-size: 13px; font-weight: 400; color: var(--ink-dim); margin-top: 5px; letter-spacing: 0; }
+
+.grid { display: grid; grid-template-columns: 150px 1fr; gap: 9px 16px; font-size: 14px; margin: 0; }
+.grid dt { color: var(--ink-dim); }
+.grid dd { margin: 0; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+
+.chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.chip {
+  font-size: 12.5px; padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--line-hi); background: var(--panel-hi); color: var(--ink);
+}
+
+.pill {
+  display: inline-flex; align-items: center; gap: 6px;
+  font: 600 11px var(--mono); padding: 4px 10px; border-radius: 999px;
+  border: 1px solid var(--line); color: var(--ink-dim); white-space: nowrap;
+}
+.pill.on { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+.pill.warn { background: var(--warn); color: #1a1205; border-color: transparent; }
+.pill.bad { background: var(--bad); color: #fff; border-color: transparent; }
+.pill.info { background: var(--info); color: #04222f; border-color: transparent; }
+.dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+
+.rail {
+  border-left: 3px solid var(--warn);
+  padding: 10px 0 10px 13px;
+  color: var(--warn);
+  font-size: 13.5px;
+  margin-top: 16px;
+}
+.rail.live { border-color: var(--info); color: var(--info); }
+.rail b { color: inherit; }
+
+.row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+
+button {
+  font: 600 14px var(--sans);
+  padding: 10px 18px; border-radius: 9px;
+  border: 1px solid var(--line-hi); background: var(--panel-hi); color: var(--ink);
+  cursor: pointer; transition: transform 80ms ease, filter 120ms ease;
+}
+button:hover:not(:disabled) { filter: brightness(1.15); }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled { opacity: 0.4; cursor: not-allowed; }
+button.go { background: var(--accent); color: var(--accent-ink); border-color: transparent; }
+button.stop { background: #2b1a1a; color: var(--bad); border-color: #46282b; }
+
+.empty { color: var(--ink-faint); font-size: 14px; }
+.empty code { font-family: var(--mono); color: var(--ink-dim); }
+
+/* ---------- transcript ---------- */
+.log { font: 12.5px/1.6 var(--mono); max-height: 260px; overflow-y: auto; }
+.log div { padding: 5px 0; border-bottom: 1px solid #1a1f26; }
+.log div:last-child { border-bottom: 0; }
+.log .ai { color: var(--accent); }
+.log .them { color: var(--info); }
+.log .sys { color: var(--ink-faint); }
+
+/* ---------- human in the loop card ---------- */
+.hitl {
+  border: 1px solid var(--accent);
+  border-radius: var(--r);
+  background: linear-gradient(180deg, rgba(110, 231, 168, 0.08), transparent);
+  padding: 16px;
+}
+.hitl h3 { margin: 0 0 6px; font-size: 14.5px; }
+.hitl p { margin: 0 0 12px; font-size: 13px; color: var(--ink-dim); }
+.hitl .num { color: var(--ink); }
+.hitl.resolved { border-color: var(--line-hi); background: none; }
+
+.outcome { display: grid; grid-template-columns: 170px 1fr; gap: 7px 14px; font-size: 13.5px; }
+.outcome dt { color: var(--ink-dim); }
+.outcome dd { margin: 0; }
+
+/* CopilotKit's own surface, tuned to this palette rather than left default. */
+.copilotKitWindow, .copilotKitChat { background: transparent !important; }

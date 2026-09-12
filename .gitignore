@@ -21,3 +21,10 @@ venv/
 node_modules/
 .next/
 .DS_Store
+
+# console secrets
+console/.env.local
+console/.next/
+console/node_modules/
+console/install.log
+console/*.log

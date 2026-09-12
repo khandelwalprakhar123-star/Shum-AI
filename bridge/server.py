@@ -349,6 +349,65 @@ class Handler(BaseHTTPRequestHandler):
             self._json({"ok": True, "telegram_sent": sent,
                         "archived": archived.name, "outcome_source": source})
 
+        elif route == "/amend":
+            # Amend the queued booking before it is dialled.
+            #
+            # DELIBERATELY NARROW. dial_number, real_number, restaurant_name and
+            # demo_override are NOT amendable through this endpoint, by anything,
+            # ever. The number that gets dialled is settled by the poll result,
+            # OpenStreetMap and the consent allowlist in bot.py -- three places
+            # with real checks -- and an HTTP endpoint that could overwrite it
+            # would route around every one of them. The operator console exposes
+            # this to an LLM, which makes the restriction load-bearing rather
+            # than tidy.
+            pending = read_pending()
+            if not pending or not pending.get("restaurant_name"):
+                self._json({"error": "nothing pending to amend"}, 409)
+                return
+
+            patch: dict = {}
+            errors: list[str] = []
+
+            if "party_size" in body:
+                try:
+                    size = int(body["party_size"])
+                except (TypeError, ValueError):
+                    errors.append("party_size must be a whole number")
+                else:
+                    if 1 <= size <= 40:
+                        patch["party_size"] = size
+                    else:
+                        errors.append("party_size must be between 1 and 40")
+
+            for field, cap in (("when_text", 120), ("booking_name", 60), ("notes", 300)):
+                if field in body:
+                    value = str(body[field] or "").strip()
+                    if not value:
+                        errors.append(f"{field} cannot be empty")
+                    else:
+                        patch[field] = value[:cap]
+
+            rejected = [k for k in body if k not in
+                        ("party_size", "when_text", "booking_name", "notes")]
+            if rejected:
+                errors.append(
+                    "not amendable here: " + ", ".join(sorted(rejected))
+                    + " (the number to dial and the restaurant are settled by the poll, "
+                      "OpenStreetMap and the consent allowlist)"
+                )
+
+            if errors:
+                self._json({"error": "; ".join(errors)}, 400)
+                return
+            if not patch:
+                self._json({"error": "no amendable fields supplied"}, 400)
+                return
+
+            patch["amended_at"] = datetime.now(timezone.utc).isoformat()
+            updated = patch_pending(**patch)
+            print(f"[bridge] amended: {', '.join(k for k in patch if k != 'amended_at')}")
+            self._json(updated)
+
         elif route == "/cancel":
             self._json(patch_pending(dial=False, status="cancelled"))
 

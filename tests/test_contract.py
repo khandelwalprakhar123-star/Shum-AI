@@ -55,7 +55,7 @@ def fields_page_reads() -> set[str]:
 
 
 def run() -> Suite:
-    s = Suite("contract", expect_at_least=18)
+    s = Suite("contract", expect_at_least=30)
 
     written = fields_bot_writes()
     read = fields_page_reads()
@@ -172,4 +172,89 @@ def run() -> Suite:
             "conversation_id" in PAGE_SRC and "conversationId" in PAGE_SRC)
     s.check("a derived outcome is labelled as derived in the chat message",
             "derived" in SERVER_SRC)
+
+    # ---------------------------------------------------------------
+    # The console contract.
+    # ---------------------------------------------------------------
+    console = ROOT / "console"
+    if not console.exists():
+        s.check("console directory exists", False, "console/ is missing")
+        return s
+
+    lib = (console / "lib" / "bridge.ts").read_text(encoding="utf-8")
+    panel = (console / "components" / "Console.tsx").read_text(encoding="utf-8")
+    provider = (console / "components" / "Providers.tsx").read_text(encoding="utf-8")
+    runtime = (console / "app" / "api" / "copilotkit" / "[[...path]]" / "route.ts").read_text(encoding="utf-8")
+
+    # The console is a THIRD reader of pending_call.json. A field it reads that
+    # the bot never writes renders as a blank in front of an audience.
+    # Scope to the PendingCall interface. An unscoped regex also swept up
+    # BridgeConfig's fields and the `bridge` client's method names, and then
+    # "failed" by reporting `health` and `base` as missing booking fields.
+    block = lib[lib.index("export interface PendingCall {"):]
+    block = block[:block.index("\n}")]
+    ts_fields = set(re.findall(r"^\s{2}([a-z_]+)\??:", block, re.M))
+    s.check("the console's PendingCall interface was parsed", len(ts_fields) > 10,
+            f"found {sorted(ts_fields)}")
+
+    # bot.py writes the booking; bridge/server.py writes the result of the call.
+    # Both are legitimate producers, so the console may read either.
+    server_written = set(re.findall(r"^\s+(?:patch_pending|write_pending)\(", SERVER_SRC, re.M))
+    server_fields = set(re.findall(r"\b([a-z_]+)=", SERVER_SRC[
+        SERVER_SRC.index("patch_pending("):])) if "patch_pending(" in SERVER_SRC else set()
+    produced = written | server_fields | {"outcome", "outcome_source", "finished_at", "amended_at"}
+    unknown = ts_fields - produced
+    s.check("every field the console types is one the bot or the bridge writes",
+            not unknown, f"console types but nothing writes: {sorted(unknown)}")
+
+    # v2, not the deprecated v1 API every tutorial still shows.
+    s.check("console imports from the v2 entry point",
+            "@copilotkit/react-core/v2" in provider and "@copilotkit/react-core/v2" in panel)
+    s.check("console uses CopilotKitProvider, not the v1 CopilotKit component",
+            "CopilotKitProvider" in provider)
+    # Check for real USAGE, not prose. The first version of this check tripped
+    # on the source comment that warns useCopilotAction is deprecated — a test
+    # that fails because the code documents the thing it avoids is a bad test.
+    def strip_comments(src: str) -> str:
+        src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+        return re.sub(r"^\s*//.*$", "", src, flags=re.M)
+
+    for label, src in (("Console.tsx", panel), ("Providers.tsx", provider)):
+        code = strip_comments(src)
+        s.check(f"{label} does not actually call the deprecated useCopilotAction",
+                "useCopilotAction(" not in code and "useCopilotAction," not in code
+                and "useCopilotAction " not in code)
+    s.check("the deprecation IS documented in a comment, so nobody re-adds it",
+            "useCopilotAction" in provider)
+    s.check("console uses useFrontendTool", "useFrontendTool" in panel)
+    s.check("console uses useHumanInTheLoop", "useHumanInTheLoop" in panel)
+    s.check("console uses useAgentContext for shared state", "useAgentContext" in panel)
+    s.check("runtime imports from @copilotkit/runtime/v2",
+            "@copilotkit/runtime/v2" in runtime)
+    s.check("runtime uses BuiltInAgent", "BuiltInAgent" in runtime)
+    s.check("runtime uses a Google model, needing no OpenAI key",
+            "createGoogleGenerativeAI" in runtime and "OPENAI" not in runtime.upper())
+
+    # The safety property, asserted structurally.
+    hitl = panel[panel.index("useHumanInTheLoop("):]
+    hitl = hitl[:hitl.index("\n  });")]
+    s.check("place_call is the human-in-the-loop tool", '"place_call"' in hitl)
+    s.check("place_call has NO handler — the model cannot resolve it alone",
+            "handler:" not in hitl)
+    s.check("place_call renders an approval card instead", "render:" in hitl)
+    s.check("approval calls the bridge rather than dialling in the browser",
+            "bridge.dial()" in hitl)
+
+    # Amend must not be able to route around the consent allowlist.
+    s.check("the bridge exposes /amend", '"/amend"' in SERVER_SRC)
+    amend = SERVER_SRC[SERVER_SRC.index('route == "/amend"'):]
+    amend = amend[:amend.index('route == "/cancel"')]
+    for forbidden in ("dial_number", "real_number", "restaurant_name", "demo_override"):
+        s.check(f"/amend refuses to change {forbidden}",
+                f'"{forbidden}"' not in amend.split("rejected")[0]
+                or forbidden in amend)
+    s.check("/amend allowlists only the four safe fields",
+            '("party_size", "when_text", "booking_name", "notes")' in amend)
+    s.check("the console's amend helper sends only those four fields",
+            all(f in lib for f in ("party_size", "when_text", "booking_name", "notes")))
     return s
