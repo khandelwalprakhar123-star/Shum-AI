@@ -135,6 +135,15 @@ open "/Applications/Python 3.14/Install Certificates.command"
 ```
 That installer does not wire Python into the system keychain — it expects a `cert.pem` it never creates. The symptom is vicious: `curl https://...` works perfectly while *every* `urllib` call in the same shell dies with `CERTIFICATE_VERIFY_FAILED`. Since every network call here goes through `urllib`, nothing works at all, and the error points at certificates rather than the one-line fix. Both `bot.py` and `bridge/server.py` now check the trust store at startup and print the exact command if it's empty.
 
+**Provision the ElevenLabs agent from the docs, rather than by hand:**
+```bash
+python3 setup_agent.py --dry-run   # show what it parsed
+python3 setup_agent.py             # create or update the agent, then verify it
+```
+`docs/elevenlabs-agent.md` is the single source of truth: this script parses the first message, the system prompt and the six-field data-collection schema straight out of it and provisions the agent over the API. The prompt a human reads and the prompt the agent runs cannot drift, because they are the same bytes.
+
+It **refuses to provision** a prompt that uses a `{{variable}}` the call page never sends, or a first message that doesn't disclose being an AI — both of those fail silently otherwise, and a silently wrong agent makes a fluent, confident call that mentions no dietary constraint and no time. Afterwards it reads the agent back from the server and checks six things stuck, because trusting a `200` is how you end up with an agent missing the thing you just set.
+
 **Check everything before it matters:**
 ```bash
 python3 preflight.py
