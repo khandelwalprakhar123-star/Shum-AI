@@ -44,6 +44,12 @@ import pipeline
 from envlite import env, env_flag, env_list, load_env, warn_if_tls_broken
 
 PENDING_PATH = ROOT / "bridge" / "pending_call.json"
+# Chat history on disk. The whole pitch of this project is "it has read the
+# last two hundred messages", and holding those only in memory meant any crash
+# or restart forgot the entire conversation -- permanently, because Telegram
+# hands each update over exactly once and will not re-deliver it. Found the
+# hard way: a restart mid-test turned a 40-line history into 2.
+STATE_PATH = ROOT / "chat_state.json"
 BRIDGE_BASE = "http://127.0.0.1:8080"
 API_TIMEOUT = 40
 HISTORY_LIMIT = 200
@@ -136,6 +142,70 @@ def state_for(chat_id: int) -> ChatState:
     if chat_id not in STATE:
         STATE[chat_id] = ChatState()
     return STATE[chat_id]
+
+
+# ---------------------------------------------------------------------------
+# Persistence
+# ---------------------------------------------------------------------------
+# Everything a restart must not lose: the history, and enough of the decision
+# in flight that /close still works after a crash between /decide and /close.
+
+def save_state() -> None:
+    try:
+        blob = {
+            str(chat_id): {
+                "history": list(st.history),
+                "constraints": st.constraints,
+                "picks": st.picks,
+                "poll_id": st.poll_id,
+                "poll_message_id": st.poll_message_id,
+                "poll_options": st.poll_options,
+                "votes": {str(k): v for k, v in st.votes.items()},
+                "voter_names": {str(k): v for k, v in st.voter_names.items()},
+                "approval_token": st.approval_token,
+                "approval_payload": st.approval_payload,
+            }
+            for chat_id, st in STATE.items()
+        }
+        tmp = STATE_PATH.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(blob, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(STATE_PATH)  # atomic: a crash mid-write cannot truncate it
+    except OSError as exc:
+        print(f"[bot] could not save state: {exc}")
+
+
+def load_state() -> int:
+    if not STATE_PATH.exists():
+        return 0
+    try:
+        blob = json.loads(STATE_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        print(f"[bot] state file unreadable ({type(exc).__name__}); starting fresh")
+        return 0
+
+    restored = 0
+    for raw_id, data in (blob or {}).items():
+        try:
+            chat_id = int(raw_id)
+        except (TypeError, ValueError):
+            continue
+        st = state_for(chat_id)
+        for line in (data.get("history") or [])[-HISTORY_LIMIT:]:
+            if isinstance(line, str) and line.strip():
+                st.history.append(line)
+        st.constraints = data.get("constraints") or {}
+        st.picks = data.get("picks") or []
+        st.poll_id = data.get("poll_id")
+        st.poll_message_id = data.get("poll_message_id")
+        st.poll_options = data.get("poll_options") or []
+        # JSON turns integer keys into strings; user ids must come back as ints
+        # or a re-vote after a restart counts as a second voter.
+        st.votes = {int(k): v for k, v in (data.get("votes") or {}).items() if str(k).lstrip("-").isdigit()}
+        st.voter_names = {int(k): v for k, v in (data.get("voter_names") or {}).items() if str(k).lstrip("-").isdigit()}
+        st.approval_token = data.get("approval_token")
+        st.approval_payload = data.get("approval_payload")
+        restored += len(st.history)
+    return restored
 
 
 # ===========================================================================
@@ -269,6 +339,7 @@ def handle_decide(tg: Telegram, chat_id: int, state: ChatState) -> None:
             state.poll_options = options
             state.votes = {}
             state.voter_names = {}
+            save_state()
             tg.send(chat_id, "Vote above. <b>/close</b> when you're done and I'll take it from there.")
         else:
             tg.send(chat_id, "Couldn't post the poll. Reply with 1, 2 or 3 instead and use /close.")
@@ -396,6 +467,7 @@ def handle_close(tg: Telegram, chat_id: int, state: ChatState) -> None:
         )
     card.append("\nA human presses the button, and a human dials the phone. I never call on my own.")
 
+    save_state()
     tg.send(
         chat_id, "\n".join(card),
         reply_markup={
@@ -508,6 +580,7 @@ def handle_message(tg: Telegram, message: dict) -> None:
     command = re.match(r"^/([a-z_]+)(?:@\w+)?\b", text.strip(), re.I)
     if not command:
         state.add(author, text)
+        save_state()
         return
 
     verb = command.group(1).lower()
@@ -531,6 +604,7 @@ def handle_message(tg: Telegram, message: dict) -> None:
         )
     else:
         state.add(author, text)
+        save_state()
 
 
 def handle_poll_answer(answer: dict) -> None:
@@ -544,6 +618,7 @@ def handle_poll_answer(answer: dict) -> None:
                 state.voter_names[user.get("id")] = user.get("first_name", "?")
             else:
                 state.votes.pop(user.get("id"), None)   # retracted vote
+            save_state()
             return
 
 
@@ -595,7 +670,14 @@ def main() -> None:
         allow = env_list("CONSENTED_NUMBERS")
         print(f"[bot] live calling enabled; consent allowlist has {len(allow)} number(s)")
 
+    restored = load_state()
+    if restored:
+        print(f"[bot] restored {restored} lines of history across {len(STATE)} chat(s) from disk")
+    else:
+        print("[bot] no saved history \u2014 starting with an empty memory")
+
     offset = drain_backlog(tg)
+    save_state()
     print("[bot] live. /decide in a group to start.")
 
     while True:

@@ -407,6 +407,45 @@ def _clean_money(value):
     return _clean_int(value, 40, 5000)
 
 
+# Verbs a model puts at the front of a preference. The renderer already says
+# "prefers", so leaving them produces "prefers Wants pizza".
+_PREFERENCE_PREFIXES = (
+    "wants ", "want ", "would like ", "would prefer ", "prefers ", "prefer ",
+    "looking for ", "keen on ", "fancies ", "in the mood for ",
+)
+
+
+def _tidy_constraint(text: str, bucket: str) -> str:
+    """Strip a leading preference verb and normalise the opening capital.
+
+    Only for soft constraints: a hard one reading "Does not eat pork" is
+    correct as written, and rewriting it risks changing its meaning.
+    """
+    cleaned = " ".join(text.split())
+    if bucket == "soft":
+        lowered = cleaned.lower()
+        for prefix in _PREFERENCE_PREFIXES:
+            if lowered.startswith(prefix):
+                cleaned = cleaned[len(prefix):].strip()
+                break
+        # "Pizza" mid-sentence after "prefers" should not be capitalised, but a
+        # proper noun like "Thai" must keep its capital.
+        if cleaned[:1].isupper() and not cleaned.split(" ")[0][1:].isupper():
+            head = cleaned.split(" ")[0]
+            if head.lower() in _COMMON_NOUNS:
+                cleaned = cleaned[:1].lower() + cleaned[1:]
+    return cleaned
+
+
+# Lowercased because they are not proper nouns; anything not on this list keeps
+# whatever capitalisation the model gave it, so "Thai" and "Sha Tin" survive.
+_COMMON_NOUNS = {
+    "pizza", "somewhere", "something", "food", "a", "an", "the", "vegetables",
+    "veg", "noodles", "dumplings", "rice", "spicy", "cheap", "quiet", "outdoor",
+    "indoor", "vegetarian", "vegan", "halal", "seafood", "dessert", "drinks",
+}
+
+
 def _normalise_constraints(raw: dict, provider: str) -> dict:
     out = _empty_constraints("")
     out["source"] = provider
@@ -416,25 +455,54 @@ def _normalise_constraints(raw: dict, provider: str) -> dict:
     out["when_text"] = when.strip() if isinstance(when, str) and when.strip() else None
 
     for bucket in ("hard", "soft"):
+        seen: set[str] = set()
         for item in _as_list(raw.get(bucket)):
             if isinstance(item, str) and item.strip():
-                out[bucket].append({"constraint": item.strip(), "who": "", "quote": ""})
+                entry = {"constraint": item.strip(), "who": "", "quote": ""}
             elif isinstance(item, dict) and str(item.get("constraint", "")).strip():
-                out[bucket].append({
+                entry = {
                     "constraint": str(item["constraint"]).strip(),
                     "who": str(item.get("who") or "").strip(),
                     "quote": str(item.get("quote") or "").strip(),
-                })
+                }
+            else:
+                continue
 
+            entry["constraint"] = _tidy_constraint(entry["constraint"], bucket)
+            # Models restate the same preference from two different messages and
+            # emit it twice. "prefers Wants pizza" appearing twice in one list
+            # reads as a bug in the agent's reading, which is exactly the
+            # impression this project cannot afford to give.
+            key = _norm(entry["constraint"])
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            out[bucket].append(entry)
+
+    seen_vetoes: dict[str, dict] = {}
     for item in _as_list(raw.get("vetoed")):
         if isinstance(item, str) and item.strip():
-            out["vetoed"].append({"thing": item.strip(), "times_rejected": 1, "quote": ""})
+            entry = {"thing": item.strip(), "times_rejected": 1, "quote": ""}
         elif isinstance(item, dict) and str(item.get("thing", "")).strip():
-            out["vetoed"].append({
+            entry = {
                 "thing": str(item["thing"]).strip(),
                 "times_rejected": _clean_int(item.get("times_rejected")) or 1,
                 "quote": str(item.get("quote") or "").strip(),
-            })
+            }
+        else:
+            continue
+        key = _norm(entry["thing"])
+        if not key:
+            continue
+        held = seen_vetoes.get(key)
+        if held is None:
+            seen_vetoes[key] = entry
+        else:
+            # Same dish twice means the group rejected it twice, which is the
+            # two-strikes rule -- so add the counts rather than dropping one.
+            held["times_rejected"] = max(held["times_rejected"], entry["times_rejected"])
+            held["quote"] = held["quote"] or entry["quote"]
+    out["vetoed"] = list(seen_vetoes.values())
 
     for item in _as_list(raw.get("coming_from")):
         if isinstance(item, dict) and str(item.get("place", "")).strip():
@@ -446,7 +514,8 @@ def _normalise_constraints(raw: dict, provider: str) -> dict:
             out["coming_from"].append({"who": "", "place": item.strip()})
 
     for key in ("prefer_cuisines", "avoid_cuisines", "open_questions"):
-        out[key] = [str(v).strip() for v in _as_list(raw.get(key)) if str(v).strip()]
+        values = [" ".join(str(v).split()) for v in _as_list(raw.get(key)) if str(v).strip()]
+        out[key] = list(dict.fromkeys(values))   # dedupe, order preserved
 
     summary = raw.get("summary_line")
     out["summary_line"] = (

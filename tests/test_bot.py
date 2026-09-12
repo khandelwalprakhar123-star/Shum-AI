@@ -56,9 +56,17 @@ def msg(text, chat_id=-100, name="Marcus", update_id=1):
         "chat": {"id": chat_id}, "from": {"first_name": name, "id": 7}, "text": text}}
 
 
+SUITE_STATE = Path(__file__).resolve().parent / "_test_suite_state.json"
+
+
 def run() -> Suite:
-    s = Suite("bot", expect_at_least=52)
+    s = Suite("bot", expect_at_least=66)
     bot.PENDING_PATH = TMP_PENDING
+    # Redirect persistence for the entire suite. Without this, every handler
+    # under test wrote into the project's real chat_state.json and the next
+    # real bot start restored test chats as if they were a conversation.
+    real_state_path = bot.STATE_PATH
+    bot.STATE_PATH = SUITE_STATE
     for key in ("DEMO_PHONE", "CONSENTED_NUMBERS", "ALLOW_ANY_NUMBER"):
         os.environ.pop(key, None)
     os.environ["BOOKER_NAME"] = "Prakhar"
@@ -367,6 +375,65 @@ def run() -> Suite:
     s.eq("cancelling clears the pending call", json.loads(TMP_PENDING.read_text())["status"], "cancelled")
     s.contains("and says nothing was dialled", tg.sent_text(), "Nothing was dialled")
 
+    # --- history survives a restart ---------------------------------------
+    # Found live and it is the worst possible bug for this project: history was
+    # in memory only, so a restart turned a 40-line conversation into 2 --
+    # permanently, because Telegram hands each update over exactly once and
+    # will not re-deliver. A project whose pitch is "it has read the last two
+    # hundred messages" cannot forget them on a crash.
+    tmp_state = Path(__file__).resolve().parent / "_test_state.json"
+    suite_state = bot.STATE_PATH
+    bot.STATE_PATH = tmp_state
+    try:
+        bot.STATE.clear()
+        live = bot.state_for(-4242)
+        live.add("Priya", "i can't eat pork")
+        live.add("Dan", "coming from sha tin\nand not hotpot again")
+        live.constraints = {"party_size": 6, "when_text": "Friday 8pm", "hard": []}
+        live.picks = [{"name": "Somewhere", "phone": "+85228033960"}]
+        live.poll_id = "poll-persist"
+        live.poll_message_id = 321
+        live.poll_options = ["a", "b", "c", bot.NONE_OPTION]
+        live.votes = {99: 1}
+        live.voter_names = {99: "Dan"}
+        live.approval_token = "tok123"
+        live.approval_payload = {"id": "tok123", "restaurant_name": "Somewhere"}
+        bot.save_state()
+        s.check("state is written to disk", tmp_state.exists())
+
+        before = list(live.history)
+        bot.STATE.clear()
+        s.eq("simulated restart really empties memory", bot.STATE, {})
+
+        restored_lines = bot.load_state()
+        after = bot.state_for(-4242)
+        s.eq("every history line comes back", list(after.history), before)
+        s.eq("the line count is reported", restored_lines, len(before))
+        s.eq("multi-line splitting survived the round trip", len(after.history), 3)
+        s.eq("constraints come back", after.constraints.get("party_size"), 6)
+        s.eq("picks come back so /close still works after a crash",
+             after.picks[0]["name"], "Somewhere")
+        s.eq("the open poll comes back", after.poll_id, "poll-persist")
+        s.eq("the poll message id comes back", after.poll_message_id, 321)
+        # JSON stringifies dict keys; a re-vote after a restart must not count
+        # as a second voter.
+        s.eq("vote keys come back as ints, not strings", after.votes, {99: 1})
+        s.check("voter names come back as ints too", 99 in after.voter_names)
+        s.eq("a pending approval token survives", after.approval_token, "tok123")
+
+        tmp_state.write_text("{ not json", encoding="utf-8")
+        bot.STATE.clear()
+        s.eq("a corrupt state file starts fresh instead of crashing", bot.load_state(), 0)
+
+        tmp_state.unlink()
+        bot.STATE.clear()
+        s.eq("no state file is not an error", bot.load_state(), 0)
+    finally:
+        if tmp_state.exists():
+            tmp_state.unlink()
+        bot.STATE_PATH = suite_state
+        bot.STATE.clear()
+
     # --- misc -------------------------------------------------------------
     tg = FakeTelegram()
     bot.handle_message(tg, msg("/status")["message"])
@@ -383,6 +450,16 @@ def run() -> Suite:
 
     if TMP_PENDING.exists():
         TMP_PENDING.unlink()
+    if SUITE_STATE.exists():
+        SUITE_STATE.unlink()
+    bot.STATE_PATH = real_state_path
+    bot.STATE.clear()
     for key in ("DEMO_PHONE", "CONSENTED_NUMBERS", "ALLOW_ANY_NUMBER"):
         os.environ.pop(key, None)
+
+    # The suite must leave no trace in the project directory.
+    s.check("the test run wrote no real chat_state.json",
+            not (Path(__file__).resolve().parent.parent / "chat_state.json").exists(),
+            "tests leaked state into the repo")
+    s.check("the suite's own temp state file is cleaned up", not SUITE_STATE.exists())
     return s

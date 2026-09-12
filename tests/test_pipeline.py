@@ -33,7 +33,7 @@ GOOD = {
 
 
 def run() -> Suite:
-    s = Suite("pipeline", expect_at_least=46)
+    s = Suite("pipeline", expect_at_least=58)
     os.environ["GEMINI_API_KEY"] = "AQ.test-key-not-real"
     os.environ.pop("OPENROUTER_API_KEY", None)
 
@@ -260,6 +260,43 @@ def run() -> Suite:
 
     s.eq("no candidates means no model call and an honest empty result",
          pipeline.propose(GOOD, [])["picks"], [])
+
+    # --- dedupe and phrasing ---------------------------------------------
+    # Seen live: "prefers Wants pizza" printed TWICE in one constraint list.
+    # Two bugs in one line -- the model restated the same preference from two
+    # messages, and the renderer blindly prefixed "prefers" to whatever text it
+    # was given. A duplicated, ungrammatical constraint list reads as an agent
+    # that cannot read, which is the one impression this project cannot afford.
+    messy = {
+        "party_size": None, "when_text": None, "budget_per_head_hkd": 100,
+        "hard": [{"constraint": "Does not eat pork", "who": "Prakhar", "quote": "q"},
+                 {"constraint": "Does not eat pork", "who": "Prakhar", "quote": "dup"}],
+        "soft": [{"constraint": "Wants pizza", "who": "", "quote": ""},
+                 {"constraint": "Wants pizza", "who": "", "quote": ""},
+                 {"constraint": "would like Thai", "who": "", "quote": ""},
+                 {"constraint": "prefers somewhere quiet", "who": "", "quote": ""}],
+        "vetoed": [{"thing": "hotpot", "times_rejected": 2, "quote": "q"},
+                   {"thing": "Hotpot", "times_rejected": 1, "quote": ""}],
+        "coming_from": [], "prefer_cuisines": ["thai", "thai"], "avoid_cuisines": [],
+        "open_questions": ["What time?", "What time?"], "summary_line": "x",
+    }
+    tidy = pipeline._normalise_constraints(messy, "gemini")
+    s.eq("a repeated hard constraint appears once", len(tidy["hard"]), 1)
+    s.eq("a repeated soft constraint appears once",
+         [x["constraint"] for x in tidy["soft"]].count("pizza"), 1)
+    s.eq("the same veto twice is one entry", len(tidy["vetoed"]), 1)
+    s.eq("and keeps the higher rejection count", tidy["vetoed"][0]["times_rejected"], 2)
+    s.eq("duplicate cuisines collapse", tidy["prefer_cuisines"], ["thai"])
+    s.eq("duplicate open questions collapse", tidy["open_questions"], ["What time?"])
+
+    softs = [x["constraint"] for x in tidy["soft"]]
+    s.contains("'Wants pizza' becomes 'pizza'", softs, "pizza")
+    s.check("so the renderer never prints 'prefers Wants'",
+            "prefers Wants" not in pipeline.render_constraints(tidy))
+    s.contains("'would like Thai' keeps the proper noun's capital", softs, "Thai")
+    s.contains("'prefers somewhere quiet' loses only the verb", softs, "somewhere quiet")
+    s.eq("a hard constraint is NOT reworded", tidy["hard"][0]["constraint"], "Does not eat pork")
+    s.eq("whitespace is collapsed", pipeline._tidy_constraint("wants   big   table", "soft"), "big table")
 
     # --- render_constraints shows its evidence ---------------------------
     rendered = pipeline.render_constraints(GOOD)

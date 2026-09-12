@@ -28,3 +28,5 @@ console/.next/
 console/node_modules/
 console/install.log
 console/*.log
+chat_state.json
+chat_state.json.tmp
