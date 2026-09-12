@@ -19,6 +19,7 @@ pressure and four seconds to detect deliberately.
 from __future__ import annotations
 
 import json
+import re
 import sys
 import urllib.error
 import urllib.parse
@@ -213,8 +214,49 @@ def check_elevenlabs() -> None:
         agent = _get(f"https://api.elevenlabs.io/v1/convai/agents/{agent_id}",
                      {"xi-api-key": api_key})
     except urllib.error.HTTPError as exc:
-        bad("elevenlabs", f"cannot fetch the agent: HTTP {exc.code}",
-            "wrong agent id or wrong API key")
+        # ElevenLabs distinguishes these two cases for us in the response body:
+        # detail.status == "missing_permissions" means the key authenticated
+        # fine and is simply scoped too narrowly. That distinction matters
+        # because "HTTP 401" on its own sends you hunting for a typo in a key
+        # that is completely correct.
+        #
+        # Do NOT try to infer this by probing another endpoint instead: every
+        # endpoint carries its own permission, so /v1/user 401s for a
+        # convai-scoped key too, and an earlier version of this check
+        # confidently reported a valid key as rejected because of it.
+        status, message = "", ""
+        try:
+            detail = (json.loads(exc.read().decode("utf-8", "replace")) or {}).get("detail") or {}
+            status = str(detail.get("status") or "")
+            message = str(detail.get("message") or "")
+        except Exception:
+            pass
+
+        if status == "missing_permissions":
+            needed = "convai_read"
+            found = re.search(r"permission (\w+)", message)
+            if found:
+                needed = found.group(1)
+            warn("elevenlabs",
+                 f"the API key is valid but lacks the {needed} permission, so the agent's "
+                 "config cannot be checked from here and the bridge cannot read the agent's "
+                 "own post-call analysis",
+                 "elevenlabs.io -> Settings -> API Keys -> edit this key -> enable "
+                 "Conversational AI (read + write). Without it the outcome is derived from "
+                 "the transcript by Gemini, which works and is labelled as derived in the chat.")
+        elif exc.code in (401, 403):
+            bad("elevenlabs", f"the API key was rejected (HTTP {exc.code}) "
+                              f"{('- ' + message[:70]) if message else ''}",
+                "elevenlabs.io -> Settings -> API Keys")
+        elif exc.code == 404:
+            bad("elevenlabs", f"no agent with id {agent_id[:14]}\u2026 (HTTP 404)",
+                "copy the id again from elevenlabs.io -> Agents")
+        else:
+            bad("elevenlabs", f"cannot fetch the agent: HTTP {exc.code}")
+
+        warn("elevenlabs", "so verify BY HAND: authentication OFF, prompt and first message "
+                           "pasted, all six data-collection fields added",
+             "docs/elevenlabs-agent.md")
         return
     except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError) as exc:
         warn("elevenlabs", f"could not verify the agent ({type(exc).__name__})")
