@@ -345,9 +345,20 @@ async function armMicrophone() {
 // already supplied one, and never rewrite what the chat actually said --
 // pending.when_text is left alone, so the booking record and the calendar
 // entry still carry the group's own words.
+function hasClock(text) {
+  // Mirrors invite.event_time's rule: an HOUR has to be present. "this
+  // evening" and "lunchtime" are not times, and a call that says one of those
+  // to a restaurant gets a table at an hour nobody agreed to.
+  const t = String(text || "").toLowerCase();
+  return /\b(noon|midday|midnight)\b/.test(t)
+      || /\b\d{1,2}(:\d{2})?\s*(a\.?m\.?|p\.?m\.?)\b/.test(t)
+      || /\b\d{1,2}:\d{2}\b/.test(t)
+      || /\b(?:at|for|around|by|from)\s+\d{1,2}\b/.test(t);
+}
+
 function spokenWhen(text) {
   const t = String(text || "").trim();
-  if (!t) return "this evening";
+  if (!t) return t;          // validated upstream; never substitute a guess
   // Weekdays need the suffix: /fri\b/ does not match "friday", which turned
   // "friday at 9" into "at friday at 9".
   const leads = /^((at|on|in|for|around|about|by|from|this|that|today|tonight|tomorrow|next|after|before)\b|(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b)/i;
@@ -360,6 +371,24 @@ async function startAgent() {
   if (!state.armed) { log("err", "Arm the microphone first."); return; }
 
   const p = state.pending || {};
+
+  // NEVER invent the facts of a booking. This used to fall back to a party of
+  // four and a time of "this evening", which meant a missing field became
+  // something the agent said OUT LOUD to a real restaurant as though the group
+  // had asked for it. bot.py already refuses to arm a vague booking, but the
+  // operator console can /amend one and this page has a manual start button,
+  // so the last word has to be here.
+  const missing = [];
+  if (!(p.restaurant_display || p.restaurant_name)) missing.push("a restaurant");
+  const party = Number(p.party_size);
+  if (!Number.isInteger(party) || party < 1) missing.push("a party size");
+  if (!hasClock(p.when_text)) missing.push("an exact time");
+  if (missing.length) {
+    log("err", "Not starting: this booking is missing " + missing.join(" and ") +
+               ". Settle it in the chat first \u2014 the agent will not make it up.");
+    return;
+  }
+
   state.transcript = [];
   state.running = true;
   state.startedFor = p.id || "manual";
@@ -373,7 +402,7 @@ async function startAgent() {
   // accidentally edit out from here.
   const vars = {
     restaurant_name: String(p.restaurant_display || p.restaurant_name || "your restaurant"),
-    party_size: String(p.party_size ?? 4),
+    party_size: String(party),
     when_text: spokenWhen(p.when_text),
     booking_name: String(p.booking_name || state.cfg.booker_name || "a guest"),
     callback_number: String(p.callback_number || state.cfg.callback_number || ""),

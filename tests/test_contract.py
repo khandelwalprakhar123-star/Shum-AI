@@ -55,7 +55,7 @@ def fields_page_reads() -> set[str]:
 
 
 def run() -> Suite:
-    s = Suite("contract", expect_at_least=96)
+    s = Suite("contract", expect_at_least=122)
 
     written = fields_bot_writes()
     read = fields_page_reads()
@@ -277,6 +277,72 @@ def run() -> Suite:
             "Object.keys(p).length" not in PAGE_SRC)
     s.check("and the reason is recorded next to the check",
             "never emptied" in PAGE_SRC)
+
+    # --- the agent must never invent the facts of a booking ----------------
+    #
+    # The page read `p.party_size ?? 4` and defaulted the time to "this
+    # evening", so a missing field became something the agent said OUT LOUD to
+    # a real restaurant as though the group had asked for it. bot.py refuses to
+    # arm a vague booking, but the console can /amend one and this page has a
+    # manual start button, so the last word belongs here.
+    s.check("no invented party size", "party_size ?? 4" not in PAGE_SRC)
+    s.check("no invented time", '"this evening";' not in PAGE_SRC)
+    s.check("the page refuses to start an incomplete booking",
+            "missing.push" in PAGE_SRC and "will not make it up" in PAGE_SRC)
+    s.check("it requires a real hour, not just any words",
+            "function hasClock" in PAGE_SRC)
+    s.check("...and checks a restaurant, a party size and a time",
+            all(x in PAGE_SRC for x in ("a restaurant", "a party size", "an exact time")))
+
+    # --- the bridge will not re-arm or rewrite a call ----------------------
+    #
+    # A second POST /dial on a finished call gave it a new live message and an
+    # empty transcript; /amend applied to a call already on the phone; /cancel
+    # marked a completed booking cancelled, so the record denied a table that
+    # exists. All three reproduced over HTTP against the real server.
+    s.check("/dial refuses anything not waiting to be dialled",
+            "not waiting to be dialled" in SERVER_SRC)
+    s.check("/amend refuses a call in flight or finished",
+            "can no longer be amended" in SERVER_SRC)
+    s.check("/cancel refuses a finished call",
+            "already finished" in SERVER_SRC)
+    # EXECUTED, not grepped. The first version of this gate read
+    # `not pipeline.time_is_bookable(value)`, which is always False because
+    # that function returns a (ok, reason) TUPLE and a non-empty tuple is
+    # truthy. The grep-for-the-call test passed; the endpoint accepted "this
+    # evening" with a 200. Only driving the real server caught it, so this now
+    # runs the check instead of reading it.
+    import bridge.server as _srv  # noqa: PLC0415
+    for vague in ("this evening", "tonight", "lunchtime", "sometime", "friday"):
+        ok, why = _srv.amend_when_text(vague)
+        s.check(f"/amend refuses when_text {vague!r}", ok is False, why)
+        s.check(f"...and says why for {vague!r}", bool(why) and "when_text" in why)
+    for real in ("8pm", "20:30", "noon", "tomorrow at 7:30 pm"):
+        ok, why = _srv.amend_when_text(real)
+        s.check(f"/amend accepts when_text {real!r}", ok is True, why)
+    s.check("/amend routes through that checked helper",
+            "amend_when_text(value)[0]" in SERVER_SRC)
+    # The bug was a truthiness mistake, so pin the shape the helper returns:
+    # anything that goes back to returning a bare tuple breaks these.
+    shape = _srv.amend_when_text("this evening")
+    s.check("the helper returns a 2-tuple", isinstance(shape, tuple) and len(shape) == 2)
+    s.check("...whose first element is a real bool", shape[0] is False)
+
+    # --- the search pool is ranked before it is cut ------------------------
+    #
+    # The cache is territory-wide and constraint-blind by design, so cutting it
+    # to 60 before relevance_rank threw away the rows the chat had asked for:
+    # measured, 1 of 15 Sha Tin rows survived, which is indistinguishable from
+    # "there are no restaurants near Sha Tin".
+    places_src = (ROOT / "places.py").read_text(encoding="utf-8")
+    s.check("search_places can return the whole pool",
+            "limit: int | None = 60" in places_src)
+    s.check("...and every return path honours that",
+            "[:limit]" not in places_src.split("def search_places")[1])
+    s.check("the bot asks for the whole pool",
+            "search_places(areas=wanted_areas, limit=None)" in BOT_SRC)
+    s.check("...and cuts only after ranking",
+            ", constraints\n        )[:60]" in BOT_SRC)
 
     # --- dialling is a human's job, permanently ---------------------------
     #

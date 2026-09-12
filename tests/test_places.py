@@ -20,7 +20,7 @@ from harness import FakeNet, Suite, http_error, overpass_ok, timeout_error, url_
 
 
 def run() -> Suite:
-    s = Suite("places", expect_at_least=66)
+    s = Suite("places", expect_at_least=71)
 
     # --- phone normalisation: every real-world shape ----------------------
     good = {
@@ -100,6 +100,27 @@ def run() -> Suite:
          places._row_from_element({"type": "node", "id": 1, "tags": {"name": "Nowhere"}}), None)
     s.eq("a place with no name is dropped",
          places._row_from_element({"type": "node", "id": 1, "lat": 22.28, "lon": 114.15, "tags": {}}), None)
+    # One junk tag used to hide a good one: `tags["phone"] or tags["contact:phone"]`
+    # short-circuits on "n/a", which normalises to None, so a perfectly
+    # callable restaurant came back uncallable. OSM is full of this.
+    def phone_of(tags):
+        el = {"type": "node", "id": 99, "lat": 22.28, "lon": 114.17,
+              "tags": dict(tags, name=tags.get("name", "Somewhere"))}
+        got = places._row_from_element(el)
+        return got and got.get("phone")
+
+    s.eq("a junk phone tag does not mask a good contact:phone",
+         phone_of({"phone": "n/a", "contact:phone": "+852 2123 4567"}), "+85221234567")
+    s.eq("...nor does 'see website'",
+         phone_of({"phone": "see website", "phone:HK": "+852 2522 1234"}), "+85225221234")
+    s.eq("a good phone tag still wins when it is first",
+         phone_of({"phone": "+852 2522 1234", "contact:phone": "n/a"}), "+85225221234")
+    s.eq("junk everywhere is still no number",
+         phone_of({"phone": "n/a", "contact:phone": "-"}), None)
+    s.check("and a masked number is never half-parsed",
+            phone_of({"phone": "2522"}) is None,
+            "a partial number presented as a phone number is the worst outcome here")
+
     row = places._row_from_element({
         "type": "way", "id": 42, "center": {"lat": 22.2820, "lon": 114.1580},
         "tags": {"name": "Test Place", "contact:phone": "2527 2343", "cuisine": "thai"},

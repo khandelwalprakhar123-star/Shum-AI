@@ -33,7 +33,7 @@ OSM = [
 
 
 def run() -> Suite:
-    s = Suite("exa", expect_at_least=28)
+    s = Suite("exa", expect_at_least=34)
 
     # --- no key means no attempt ------------------------------------------
     os.environ.pop("EXA_API_KEY", None)
@@ -135,4 +135,28 @@ def run() -> Suite:
             all(r["phone"] is None for r in exa_search.merge([], exa_rows)))
 
     os.environ.pop("EXA_API_KEY", None)
+    # --- this module's contract is that it never raises --------------------
+    #
+    # The extractor emits dicts, but callers and older saved state pass bare
+    # strings, and build_query({"vetoed": ["hotpot"]}) raised AttributeError.
+    # bot.py normalises first, so only direct callers hit it -- which is how a
+    # dryrun or a demo script blows up while the main flow looks fine.
+    for shape in ({"vetoed": ["hotpot"]},
+                  {"hard": ["no pork"]},
+                  {"coming_from": ["Sha Tin"]},
+                  {"vetoed": ["hotpot"], "hard": ["no pork"], "coming_from": ["Sha Tin"]}):
+        try:
+            query = exa_search.build_query(shape)
+            ok = isinstance(query, str) and "Hong Kong restaurant" in query
+        except Exception as exc:            # noqa: BLE001 - that is the bug
+            ok = False
+            query = f"{type(exc).__name__}: {exc}"
+        s.check(f"bare strings in {list(shape)} do not raise", ok, str(query))
+
+    s.contains("a bare origin still reads as 'reachable from'",
+               exa_search.build_query({"coming_from": ["Sha Tin"]}),
+               "easy to reach from Sha Tin")
+    s.contains("a bare veto still reads as a veto",
+               exa_search.build_query({"vetoed": ["hotpot"]}), "not hotpot")
+
     return s

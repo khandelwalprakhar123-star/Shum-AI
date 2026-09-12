@@ -420,7 +420,17 @@ def _row_from_element(element: dict) -> dict | None:
     if lat is None or lon is None:
         return None  # a place we cannot locate is a place we cannot recommend
 
-    phone = normalise_phone(tags.get("phone") or tags.get("contact:phone") or tags.get("phone:HK"))
+    # Take the first tag that actually NORMALISES, not the first that exists.
+    # OSM has junk in these fields -- "n/a", "-", "see website", an email --
+    # and `a or b` short-circuits on the junk, so one useless `phone` tag hid
+    # a perfectly good `contact:phone` and turned a callable restaurant into
+    # an uncallable one. Reproduced: phone="n/a" + contact:phone="+852 2123
+    # 4567" gave phone=None.
+    phone = None
+    for _tag in ("phone", "contact:phone", "phone:HK", "contact:mobile", "mobile"):
+        phone = normalise_phone(tags.get(_tag))
+        if phone:
+            break
     # A website is worth keeping even when we have a phone number: when the
     # agent cannot get through, or the venue only takes online bookings, a real
     # link is a far more honest answer than a shrug. Phone is still preferred --
@@ -577,12 +587,23 @@ def cache_age_seconds() -> float | None:
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def search_places(areas: list[str] | None = None, limit: int = 60,
+def _cut(rows: list[dict], limit: int | None) -> list[dict]:
+    return rows if limit is None else rows[:limit]
+
+
+def search_places(areas: list[str] | None = None, limit: int | None = 60,
                   force_live: bool = False) -> list[dict]:
     """Fresh cache, else live Overpass, else stale cache, else the seed names.
 
     Always returns something. The only layer that can return rows with no phone
     number is the last one, and it says so.
+
+    `limit=None` returns the whole pool. Callers that are about to re-rank by
+    the districts the chat named MUST do that, because this function's own
+    ordering knows nothing about the chat: dedupe_and_rank is territory-wide.
+    Cutting to 60 first was measured to leave 1 of 15 Sha Tin rows alive before
+    relevance_rank ever saw them, which looked exactly like "no restaurants
+    near Sha Tin".
     """
     wanted = [a for a in (areas or list(AREAS)) if a in AREAS] or list(AREAS)
 
@@ -594,7 +615,7 @@ def search_places(areas: list[str] | None = None, limit: int = 60,
                 callable_count = sum(1 for r in cached if r.get("phone"))
                 print(f"[places] cache hit ({age / 60:.0f} min old): "
                       f"{len(cached)} places, {callable_count} callable")
-                return dedupe_and_rank(cached)[:limit]
+                return _cut(dedupe_and_rank(cached), limit)
 
     rows: list[dict] = []
     for key in wanted[:3]:  # three boxes is the most that finishes in time
@@ -608,19 +629,19 @@ def search_places(areas: list[str] | None = None, limit: int = 60,
         callable_count = sum(1 for r in ranked if r.get("phone"))
         print(f"[places] overpass: {len(ranked)} places, {callable_count} callable")
         write_cache(ranked)
-        return ranked[:limit]
+        return _cut(ranked, limit)
 
     cached = read_cache()
     if cached:
         age = cache_age_seconds()
         stamp = f", {age / 3600:.1f}h old" if age else ""
         print(f"[places] overpass down — using cache ({len(cached)} places{stamp})")
-        return dedupe_and_rank(cached)[:limit]
+        return _cut(dedupe_and_rank(cached), limit)
 
     print(f"[places] overpass down AND cache empty — seed list only "
           f"({len(SEED_PLACES)} names, no phone numbers). Run "
           f"`python3 places.py --refresh-cache` while you have network.")
-    return dedupe_and_rank([dict(p) for p in SEED_PLACES])[:limit]
+    return _cut(dedupe_and_rank([dict(p) for p in SEED_PLACES]), limit)
 
 
 def callable_only(rows: list[dict]) -> list[dict]:

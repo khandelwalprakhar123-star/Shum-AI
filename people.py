@@ -29,6 +29,8 @@ import re
 from datetime import datetime, timezone
 from pathlib import Path
 
+from tgtext import esc
+
 ROOT = Path(__file__).resolve().parent
 PEOPLE_PATH = ROOT / "people.json"
 
@@ -155,7 +157,7 @@ def learn(store: dict, chat_id, constraints: dict) -> list[str]:
             person = _profile(store, chat_id, who)
             if _upsert(person[bucket], text, quote):
                 if bucket == "hard":
-                    learned.append(f"{person['name']}: {text}")
+                    learned.append(f"{esc(person['name'])}: {esc(text)}")
 
     for item in constraints.get("vetoed") or []:
         thing = str(item.get("thing") or "").strip()
@@ -165,7 +167,7 @@ def learn(store: dict, chat_id, constraints: dict) -> list[str]:
         group = _group(store, chat_id)
         rejections = _clean_times(item.get("times_rejected"))
         if _upsert(group["vetoes"], thing, quote, field="thing"):
-            learned.append(f"the group has vetoed {thing}")
+            learned.append(f"the group has vetoed {esc(thing)}")
         # Carry the extractor's own count across, since it read the whole
         # history and may have seen more rejections than this one pass.
         for entry in group["vetoes"]:
@@ -181,7 +183,7 @@ def learn(store: dict, chat_id, constraints: dict) -> list[str]:
         areas = person.setdefault("areas", [])
         if place not in areas:
             areas.append(place)
-            learned.append(f"{person['name']} travels from {place}")
+            learned.append(f"{esc(person['name'])} travels from {esc(place)}")
 
     return learned
 
@@ -203,8 +205,8 @@ def forget(store: dict, chat_id, name: str = "") -> str:
     key = _key(name)
     if key in chat:
         gone = chat.pop(key)
-        return f"Forgotten everything I knew about {gone.get('name', name)}."
-    return f"I don't have anything remembered for {name}."
+        return f"Forgotten everything I knew about {esc(gone.get('name', name))}."
+    return f"I don't have anything remembered for {esc(name)}."
 
 
 # ---------------------------------------------------------------------------
@@ -212,6 +214,9 @@ def forget(store: dict, chat_id, name: str = "") -> str:
 # ---------------------------------------------------------------------------
 
 def prior_knowledge(store: dict, chat_id) -> str:
+    # NOT escaped, deliberately: this string goes into an LLM prompt, not into
+    # a Telegram message. HTML-escaping it would feed the model "&amp;" and
+    # "&lt;" and teach it to repeat them back into a phone call.
     """The block handed to the extractor as things already established.
 
     Soft preferences below the confirmation threshold are deliberately left
@@ -262,25 +267,25 @@ def render(store: dict, chat_id) -> str:
     if vetoes:
         lines.append("\n<b>The group</b>")
         for item in vetoes:
-            lines.append(f"  \u2022 vetoed <b>{item.get('thing')}</b> "
-                         f"\u00b7 {item.get('times')}\u00d7")
+            lines.append(f"  \u2022 vetoed <b>{esc(item.get('thing'))}</b> "
+                         f"\u00b7 {esc(item.get('times'))}\u00d7")
             if item.get("quote"):
-                lines.append(f"      \u201c{item['quote']}\u201d")
+                lines.append(f"      \u201c{esc(item['quote'])}\u201d")
 
     for person in sorted(roster, key=lambda p: p.get("name", "")):
-        lines.append(f"\n<b>{person.get('name')}</b>")
+        lines.append(f"\n<b>{esc(person.get('name'))}</b>")
         for item in person.get("hard") or []:
-            times = f" · said {item['times']}×" if int(item.get("times", 1)) > 1 else ""
-            lines.append(f"  • <b>{item.get('constraint')}</b>{times}")
+            times = f" · said {esc(item['times'])}×" if int(item.get("times", 1)) > 1 else ""
+            lines.append(f"  • <b>{esc(item.get('constraint'))}</b>{times}")
             if item.get("quote"):
-                lines.append(f"      “{item['quote']}”")
+                lines.append(f"      “{esc(item['quote'])}”")
         for item in person.get("soft") or []:
             mark = "" if int(item.get("times", 1)) >= SOFT_CONFIRM_THRESHOLD else " <i>(once, not counted yet)</i>"
-            lines.append(f"  • <i>prefers</i> {item.get('constraint')}{mark}")
+            lines.append(f"  • <i>prefers</i> {esc(item.get('constraint'))}{mark}")
         for item in person.get("vetoes") or []:
-            lines.append(f"  • rejected {item.get('thing')} {item.get('times')}×")
+            lines.append(f"  • rejected {esc(item.get('thing'))} {esc(item.get('times'))}×")
         for area in person.get("areas") or []:
-            lines.append(f"  • travels from {area}")
+            lines.append(f"  • travels from {esc(area)}")
 
     lines.append("\n<i>/forget NAME to drop someone, /forget all to wipe it.</i>")
     return "\n".join(lines)

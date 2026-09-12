@@ -27,7 +27,7 @@ SEPTEMBER = {
 
 
 def run() -> Suite:
-    s = Suite("people", expect_at_least=34)
+    s = Suite("people", expect_at_least=40)
     store: dict = {}
 
     learned = people.learn(store, -100, SEPTEMBER)
@@ -144,4 +144,37 @@ def run() -> Suite:
 
     s.eq("names match case- and punctuation-insensitively",
          people._key("Akshay (Ash)"), people._key("akshay ash"))
+    # --- /who must survive a hostile name ---------------------------------
+    #
+    # bdbc200 escaped bot.py, pipeline.py and the bridge, and missed this file.
+    # Every string here is interpolated into a parse_mode=HTML message, so one
+    # person called "Ben & Jo" or a quote containing "<" made Telegram reject
+    # the whole message with a 400 that nothing surfaces -- /who simply never
+    # arrived, and the memory looked empty.
+    from harness import unescaped as _unescaped  # noqa: PLC0415
+
+    hostile = {}
+    noted = people.learn(hostile, 77, {
+        "hard": [{"who": "Ben & Jo", "constraint": "no <shellfish>",
+                  "quote": "we can't do <shellfish> & nuts"}],
+        "vetoed": [{"thing": "Tom & Jerry's", "quote": "not Tom & Jerry's again"}],
+        "coming_from": [{"who": "A<B", "place": "Sha Tin & Tai Wai"}],
+    })
+    rendered = people.render(hostile, 77)
+    s.eq("/who escapes every name, constraint and quote", _unescaped(rendered), [])
+    s.contains("...and the ampersand survives as an entity", rendered, "Ben &amp; Jo")
+    s.contains("...as do angle brackets in a quote", rendered, "&lt;shellfish&gt;")
+    s.eq("the 'noted for next time' lines are escaped too",
+         [u for line in noted for u in _unescaped(line)], [])
+    s.eq("so is the /forget reply",
+         _unescaped(people.forget(hostile, 77, "Ben & Jo")), [])
+
+    # prior_knowledge() is the exception, on purpose: it goes into an LLM
+    # prompt, not a Telegram message. Escaping it would feed the model
+    # "&amp;" and teach it to say that out loud on a phone call.
+    prompt = people.prior_knowledge(hostile, 77)
+    s.check("prior_knowledge stays raw, because it is prompt text",
+            "&amp;" not in prompt,
+            "HTML entities in a prompt end up spoken to a restaurant")
+
     return s

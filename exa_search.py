@@ -59,13 +59,32 @@ def build_query(constraints: dict) -> str:
     which is the opposite of the constraint and the single worst wrong answer
     this module can give.
     """
+    def _items(key: str) -> list[dict]:
+        """Coerce a constraint list into dicts.
+
+        The extractor emits dicts, but callers and older saved state pass bare
+        strings, and `{"vetoed": ["hotpot"]}` used to raise AttributeError right
+        here. bot.py happens to normalise before calling, so only direct
+        callers hit it -- exactly the kind of bug that surfaces in a demo
+        script rather than in the main flow. This module's contract is that it
+        never raises; it returns [] and lets OpenStreetMap carry the search.
+        """
+        out: list[dict] = []
+        for item in constraints.get(key) or []:
+            if isinstance(item, dict):
+                out.append(item)
+            elif isinstance(item, str) and item.strip():
+                word = item.strip()
+                out.append({"constraint": word, "place": word, "thing": word})
+        return out
+
     bits = ["Hong Kong restaurant"]
 
     cuisines = [c for c in (constraints.get("prefer_cuisines") or []) if c]
     if cuisines:
         bits.append(" or ".join(cuisines[:2]))
 
-    origins = [c.get("place") for c in (constraints.get("coming_from") or []) if c.get("place")]
+    origins = [c.get("place") for c in _items("coming_from") if c.get("place")]
     if origins:
         bits.append("easy to reach from " + " and ".join(dict.fromkeys(origins))[:60])
 
@@ -77,11 +96,11 @@ def build_query(constraints: dict) -> str:
     if budget:
         bits.append(f"around HK${budget} per person")
 
-    hard = [h.get("constraint") for h in (constraints.get("hard") or []) if h.get("constraint")]
+    hard = [h.get("constraint") for h in _items("hard") if h.get("constraint")]
     if hard:
         bits.append("suitable for " + ", ".join(hard[:3]))
 
-    avoid = [v.get("thing") for v in (constraints.get("vetoed") or []) if v.get("thing")]
+    avoid = [v.get("thing") for v in _items("vetoed") if v.get("thing")]
     avoid += [c for c in (constraints.get("avoid_cuisines") or []) if c]
     if avoid:
         bits.append("not " + " or not ".join(dict.fromkeys(avoid))[:60])

@@ -342,11 +342,16 @@ def handle_decide(tg: Telegram, chat_id: int, state: ChatState) -> None:
                     seen_origins.add(area.lower())
 
         wanted_areas = places.areas_for(constraints)
-        osm_rows = places.search_places(areas=wanted_areas)
+        # Whole pool, then rank by the chat's districts, THEN cut. The other
+        # order silently discarded the rows the chat had asked for: the cache
+        # is territory-wide and constraint-blind, so a 60-row cut taken before
+        # relevance_rank left 1 of 15 Sha Tin rows alive -- indistinguishable
+        # from "there are no restaurants near Sha Tin".
+        osm_rows = places.search_places(areas=wanted_areas, limit=None)
         exa_rows = exa_search.search(constraints)
         candidates = places.relevance_rank(
             exa_search.merge(osm_rows, exa_rows), constraints
-        )
+        )[:60]
         origins = places.origin_districts(constraints)
         destinations = places.destination_districts(constraints)
         fair = places.meeting_districts(origins)[:3] if origins and not destinations else []
@@ -806,7 +811,7 @@ def handle_poll_answer(answer: dict) -> None:
 ALLOWED = ["message", "poll_answer", "callback_query"]
 
 
-def drain_backlog(tg: Telegram) -> int:
+def drain_backlog(tg: Telegram) -> int | None:
     """Absorb whatever getUpdates has queued, WITHOUT acting on any of it.
 
     On boot Telegram hands over everything since the last acknowledged offset.
@@ -819,7 +824,16 @@ def drain_backlog(tg: Telegram) -> int:
     absorbed = 0
     for _ in range(12):
         batch = tg.call("getUpdates", offset=offset, timeout=0, limit=100,
-                        allowed_updates=ALLOWED) or []
+                        allowed_updates=ALLOWED)
+        if batch is None:
+            # Could not ASK. This used to fall through to `return offset or 0`,
+            # and 0 tells Telegram "start from the beginning" -- so it re-sent
+            # the whole backlog and the live loop EXECUTED it: a /decide from
+            # twenty minutes ago re-run, a button press re-fired. One network
+            # blip at boot became a replay of every queued command. Returning
+            # None makes main() retry instead of guessing.
+            print("[bot] getUpdates unreachable while draining the backlog")
+            return None
         if not batch:
             break
         for update in batch:
@@ -864,6 +878,12 @@ def main() -> None:
         print("[bot] no saved history \u2014 starting with an empty memory")
 
     offset = drain_backlog(tg)
+    while offset is None:
+        # Refuse to enter the live loop without a confirmed drain: starting
+        # from offset 0 would replay and execute everything still queued.
+        print("[bot] retrying the drain in 3s before going live")
+        time.sleep(3)
+        offset = drain_backlog(tg)
     save_state()
     print("[bot] live. /decide in a group to start.")
 

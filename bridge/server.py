@@ -258,6 +258,22 @@ def render_live(pending: dict, turns: list[dict], finished: bool = False) -> str
     return "\n".join(lines)
 
 
+def amend_when_text(value: str) -> tuple[bool, str]:
+    """Is this an amended time the agent can actually ask a restaurant for?
+
+    Extracted from the /amend handler so it can be tested directly. The bug it
+    exists to prevent was mine: `not pipeline.time_is_bookable(value)` looks
+    right and is always False, because that function returns a (ok, reason)
+    TUPLE and a non-empty tuple is truthy. The gate silently never fired, and
+    the source-level test that grepped for the call passed anyway. Only driving
+    the real endpoint over HTTP caught it.
+    """
+    ok, why = pipeline.time_is_bookable(value)
+    if ok:
+        return True, ""
+    return False, f"when_text: {why}"
+
+
 def format_outcome(pending: dict, body: dict) -> str:
     """Turn the call into a chat message a human can act on.
 
@@ -442,6 +458,15 @@ class Handler(BaseHTTPRequestHandler):
             if not pending.get("dial_number"):
                 self._json({"error": "pending has no dial_number"}, 409)
                 return
+            # A second /dial on a finished or in-flight call re-armed it: a
+            # new live message, a fresh empty transcript, and back when
+            # auto-dial existed, a second phone call to a restaurant that had
+            # already said yes. bot.py sets "approved" immediately before it
+            # posts here, so anything else means this is not a fresh booking.
+            if str(pending.get("status") or "") not in ("approved", "awaiting_approval"):
+                self._json({"error": f"this booking is {pending.get('status')!r}, "
+                                     "not waiting to be dialled"}, 409)
+                return
             # Open the live transcript message now, so the group sees the call
             # start rather than only its result.
             live_id = send_telegram_returning_id(
@@ -539,6 +564,13 @@ class Handler(BaseHTTPRequestHandler):
             if not pending or not pending.get("restaurant_name"):
                 self._json({"error": "nothing pending to amend"}, 409)
                 return
+            # Amending a call that is happening, or has already happened,
+            # changes nothing about it -- it only makes the record disagree
+            # with what was actually said on the phone.
+            if str(pending.get("status") or "") in ("dialing", "done", "cancelled"):
+                self._json({"error": f"this booking is {pending.get('status')!r} "
+                                     "and can no longer be amended"}, 409)
+                return
 
             patch: dict = {}
             errors: list[str] = []
@@ -559,6 +591,11 @@ class Handler(BaseHTTPRequestHandler):
                     value = str(body[field] or "").strip()
                     if not value:
                         errors.append(f"{field} cannot be empty")
+                    elif field == "when_text" and not amend_when_text(value)[0]:
+                        # The chat is held to this standard, so an HTTP endpoint
+                        # wired to an LLM does not get to lower it. You cannot
+                        # book a table at "this evening".
+                        errors.append(amend_when_text(value)[1])
                     else:
                         patch[field] = value[:cap]
 
@@ -584,6 +621,12 @@ class Handler(BaseHTTPRequestHandler):
             self._json(updated)
 
         elif route == "/cancel":
+            # Marking a finished call "cancelled" rewrites history: the table
+            # was booked, and the record would then say it never was.
+            if str(read_pending().get("status") or "") == "done":
+                self._json({"error": "this call already finished - cancel the "
+                                     "booking with the restaurant, not here"}, 409)
+                return
             self._json(patch_pending(dial=False, status="cancelled"))
 
         else:

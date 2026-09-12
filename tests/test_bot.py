@@ -62,7 +62,7 @@ SUITE_PEOPLE = Path(__file__).resolve().parent / "_test_suite_people.json"
 
 
 def run() -> Suite:
-    s = Suite("bot", expect_at_least=100)
+    s = Suite("bot", expect_at_least=103)
     bot.PENDING_PATH = TMP_PENDING
     # notify_bridge_dial makes a real POST to localhost:8080. Stub it, and
     # exercise both branches deliberately further down rather than letting a
@@ -134,6 +134,25 @@ def run() -> Suite:
     s.check("no message was sent while draining", "sendMessage" not in tg.methods())
     s.check("no stale button press was answered", "answerCallbackQuery" not in tg.methods())
     s.eq("only getUpdates was called", set(tg.methods()), {"getUpdates"})
+
+    # "Could not ask" is not "nothing queued". This used to return 0, and 0
+    # tells Telegram to start from the beginning -- so one network blip at boot
+    # made it re-send the whole backlog, which the live loop then EXECUTED:
+    # a /decide from twenty minutes ago re-run, a handled button press
+    # re-fired. Returning None makes main() retry instead of guessing.
+    bot.STATE.clear()
+    tg = FakeTelegram({"getUpdates": None})
+    s.eq("an unreachable getUpdates drains to None, not 0",
+         bot.drain_backlog(tg), None)
+    bot.STATE.clear()
+    tg = FakeTelegram({"getUpdates": [[]]})
+    s.eq("an empty queue really is offset 0", bot.drain_backlog(tg), 0)
+    # A failure AFTER absorbing one batch must keep the offset it earned,
+    # otherwise those updates come back too.
+    bot.STATE.clear()
+    tg = FakeTelegram({"getUpdates": [[msg("hello", update_id=40)], None]})
+    s.eq("a mid-drain failure keeps the offset already earned",
+         bot.drain_backlog(tg), None)
 
     # --- /decide guards ---------------------------------------------------
     bot.STATE.clear()
