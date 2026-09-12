@@ -55,7 +55,7 @@ def fields_page_reads() -> set[str]:
 
 
 def run() -> Suite:
-    s = Suite("contract", expect_at_least=30)
+    s = Suite("contract", expect_at_least=40)
 
     written = fields_bot_writes()
     read = fields_page_reads()
@@ -257,4 +257,41 @@ def run() -> Suite:
             '("party_size", "when_text", "booking_name", "notes")' in amend)
     s.check("the console's amend helper sends only those four fields",
             all(f in lib for f in ("party_size", "when_text", "booking_name", "notes")))
+
+    # ---------------------------------------------------------------
+    # Three console bugs found by actually opening the page. All three
+    # rendered without erroring, which is why they need pinning.
+    # ---------------------------------------------------------------
+    proxy_path = console / "app" / "api" / "bridge" / "[...path]" / "route.ts"
+    s.check("a same-origin bridge proxy exists", proxy_path.exists())
+    if proxy_path.exists():
+        proxy = proxy_path.read_text(encoding="utf-8")
+        # The browser blocked direct :8080 fetches as ERR_BLOCKED_BY_CLIENT
+        # even with CORS headers present. Proxying removes the cross-origin
+        # hop instead of configuring around it.
+        s.check("the console fetches same-origin, not :8080 directly",
+                'const BASE = "/api/bridge"' in lib)
+        s.check("the console no longer hardcodes the bridge port client-side",
+                "127.0.0.1:8080" not in lib and "localhost:8080" not in lib)
+        s.check("the proxy allowlists routes rather than forwarding anything",
+                "ALLOWED" in proxy and "new Set(" in proxy)
+        for route in ("health", "config", "pending", "dial", "cancel", "amend"):
+            s.check(f"the proxy allows {route}", f'"{route}"' in proxy)
+        s.check("the proxy distinguishes 'bridge down' from 'bridge errored'",
+                "bridge unreachable" in proxy and "502" in proxy)
+
+    # CopilotKit v2 defaults to a light palette; without `.dark` the chat
+    # rendered light-on-light and looked like a broken panel.
+    layout = (console / "app" / "layout.tsx").read_text(encoding="utf-8")
+    s.check("the app opts CopilotKit into its dark palette",
+            'className="dark"' in layout)
+
+    # CopilotChat wraps itself in a `display: contents` div, so `.chatwrap > *`
+    # never reached .copilotKitChat and it computed to width 0 — every message
+    # wrapped one word per line.
+    css = (console / "app" / "globals.css").read_text(encoding="utf-8")
+    s.check("the stylesheet reaches past the display:contents wrapper",
+            ".chatwrap .copilotKitChat" in css or ".chatwrap > * > *" in css)
+    s.check("CopilotKit's theme variables are re-pointed at our tokens",
+            "--primary: var(--accent)" in css)
     return s

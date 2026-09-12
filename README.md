@@ -176,6 +176,33 @@ On the call page: **Arm microphone** → confirm the level bar moves → dial �
 
 The level bar is the only diagnostic that matters. If it doesn't move when the restaurant's voice comes out of the phone speaker, acoustic coupling has failed and no prompt tuning will fix it.
 
+## The operator console
+
+```bash
+cd console && npm install && npm run dev      # http://localhost:3000
+```
+
+A Next.js console built on **CopilotKit v2**, for the moment before the call goes out.
+
+It exists because of one hook. This project's entire risk surface is a single instant: an AI is about to dial a real number and speak to a real person. That is precisely what `useHumanInTheLoop` models — the agent can *propose* the call, and the call cannot proceed until a human reads a rendered card and presses a button. The approval isn't a `confirm()` bolted onto a chat; it **is** the tool call, suspended mid-execution until a person resolves it.
+
+`place_call` has **no handler**. The human-in-the-loop type omits it, so there is no code path by which the model completes the call itself — it can only suspend and wait for `respond()`. The safety property is enforced by the type rather than by a prompt asking the model to be careful, and the test suite asserts that handler stays absent.
+
+Around it: `useAgentContext` pushes the live booking and bridge health so the copilot already has the booking in front of it; `useFrontendTool` gives it `read_booking`, `amend_booking` and `cancel_booking`.
+
+`POST /amend` on the bridge is deliberately narrow — `party_size`, `when_text`, `booking_name`, `notes` and nothing else. `dial_number`, `real_number`, `restaurant_name` and `demo_override` are **not amendable by anything, ever**. The number dialled is settled by the poll, by OpenStreetMap and by the consent allowlist, and an endpoint that could overwrite it would route around all three. This console hands that endpoint to an LLM, which makes the restriction load-bearing rather than tidy.
+
+**On the v2 API**, verified by unpacking the published package rather than trusting tutorials. Every tutorial online still shows v1's `<CopilotKit>` with `useCopilotAction`, which is deprecated — mix them and you get a chat that connects and then never calls your tools. 1.71.1 actually exports `CopilotKitProvider`, `useFrontendTool`, `useHumanInTheLoop`, `useAgent` and `useAgentContext` from `@copilotkit/react-core/v2`, and `BuiltInAgent` + `createCopilotEndpoint` from `@copilotkit/runtime/v2`. `createCopilotEndpoint` returns a Hono app whose `.fetch(request)` is already the shape a Next App Router handler wants, so the runtime is four lines and no adapter. The agent runs on Gemini through a constructed `LanguageModel`, so the only credential involved is the key this project already has — **no OpenAI key needed**.
+
+Four things that only showed up by running it, none of which raised an error:
+
+| Symptom | Cause |
+|---|---|
+| Agent had no system prompt | `BuiltInAgent` takes `prompt`, not `instructions`. TypeScript caught it; a JS project would have shipped a silently instruction-less agent. |
+| `npm install` skipped TypeScript | `NODE_ENV=production` in the shell makes npm omit dev dependencies. |
+| `ERR_BLOCKED_BY_CLIENT` on every bridge call | Direct `:8080` fetches are cross-origin. CORS headers aren't enough for a strict sub-resource policy, so the console now proxies the bridge through its own origin. |
+| Chat rendered one word per line | `CopilotChat` wraps itself in a `display: contents` div, so `.chatwrap > *` styled the wrapper and `.copilotKitChat` computed to **width 0**. |
+
 ## Tests
 
 ```bash

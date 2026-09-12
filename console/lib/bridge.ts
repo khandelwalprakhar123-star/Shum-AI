@@ -49,8 +49,11 @@ export interface BridgeConfig {
   demo_phone_active: boolean;
 }
 
-const BASE =
-  process.env.NEXT_PUBLIC_BRIDGE_URL?.replace(/\/$/, "") || "http://127.0.0.1:8080";
+// Same-origin. The browser never talks to :8080 directly — app/api/bridge
+// proxies it — so there is no CORS preflight and nothing for a strict
+// sub-resource policy to block. Point BRIDGE_URL at the bridge server-side
+// instead if it ever moves off the default port.
+const BASE = "/api/bridge";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${BASE}${path}`, { cache: "no-store", ...init });

@@ -51,7 +51,13 @@ const runtime = new CopilotRuntime({
   agents: {
     operator: new BuiltInAgent({
       model: google(modelName),
-      instructions: SYSTEM,
+      // `prompt`, not `instructions`. Verified against
+      // BuiltInAgentClassicConfig in the published 1.71.1 types -- the field
+      // list is model/apiKey/maxSteps/.../prompt, and `instructions` is not
+      // among them. TypeScript caught this; a JS project would have shipped an
+      // agent with no system prompt at all and no error anywhere.
+      prompt: SYSTEM,
+      temperature: 0.3,
     }),
   },
 });

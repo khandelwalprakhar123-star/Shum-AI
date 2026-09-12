@@ -53,12 +53,17 @@ body {
 .brand span { color: var(--ink-faint); font-size: 12.5px; }
 
 /* ---------- layout ---------- */
-.body { display: grid; grid-template-columns: minmax(0, 1fr) 400px; flex: 1; min-height: 0; }
+.body { display: grid; grid-template-columns: minmax(0, 1fr) minmax(340px, 420px); flex: 1; min-height: 0; }
 .left { padding: 22px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
 .right {
   border-left: 1px solid var(--line);
   background: var(--bg-soft);
-  display: flex; flex-direction: column; min-height: 0;
+  display: flex; flex-direction: column;
+  /* min-width AND min-height both matter. A flex child defaults to
+     min-width:auto, which refuses to shrink below its content's intrinsic
+     width — so CopilotKit's composer pushed the column wider than its track
+     and the message text got clipped off the left edge instead of wrapping. */
+  min-height: 0; min-width: 0;
 }
 .right header {
   padding: 14px 18px; border-bottom: 1px solid var(--line);
@@ -69,7 +74,7 @@ body {
 .chatwrap > * { flex: 1; min-height: 0; }
 
 @media (max-width: 1000px) {
-  .body { grid-template-columns: 1fr; }
+  .body { grid-template-columns: minmax(0, 1fr); }
   .right { border-left: none; border-top: 1px solid var(--line); min-height: 60vh; }
 }
 
@@ -164,5 +169,49 @@ button.stop { background: #2b1a1a; color: var(--bad); border-color: #46282b; }
 .outcome dt { color: var(--ink-dim); }
 .outcome dd { margin: 0; }
 
-/* CopilotKit's own surface, tuned to this palette rather than left default. */
-.copilotKitWindow, .copilotKitChat { background: transparent !important; }
+/* ---------- CopilotKit surface ----------
+   v2 themes itself through these custom properties, and `.dark` (set on <html>
+   in layout.tsx) gives it a neutral grey dark palette. Neutral grey next to
+   this shell reads as a third-party widget dropped into the page, so the
+   variables are re-pointed at the same tokens the rest of the console uses.
+   Targeting the variables rather than CopilotKit's class names also means a
+   markup change on their side does not silently un-style the panel — which is
+   what happened to the v1 class selectors this replaces. */
+.dark .cpk-root,
+.dark [class*="copilotKit"],
+.chatwrap {
+  --background: var(--bg-soft);
+  --foreground: var(--ink);
+  --card: var(--panel);
+  --card-foreground: var(--ink);
+  --popover: var(--panel);
+  --popover-foreground: var(--ink);
+  --primary: var(--accent);
+  --primary-foreground: var(--accent-ink);
+  --secondary: var(--panel-hi);
+  --secondary-foreground: var(--ink);
+  --muted: var(--panel-hi);
+  --muted-foreground: var(--ink-dim);
+  --accent: var(--panel-hi);
+  --accent-foreground: var(--ink);
+  --border: var(--line);
+  --input: var(--line-hi);
+  --ring: var(--accent);
+}
+
+/* The chat has to be given a height or it collapses to its content and the
+   composer floats in the middle of the column. */
+/* CopilotChat renders a `display: contents` wrapper around .copilotKitChat, so
+   `.chatwrap > *` styles the wrapper and never reaches the chat itself — which
+   then computes to width 0 as a flex item sized from content, and every message
+   wraps one word per line. Measured: .chatwrap 419px, .copilotKitChat 0px.
+   The fix is to select the chat by both routes. */
+.chatwrap { display: flex; min-height: 0; min-width: 0; overflow: hidden; }
+.chatwrap > *,
+.chatwrap > * > *,
+.chatwrap .copilotKitChat {
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  min-height: 0;
+}

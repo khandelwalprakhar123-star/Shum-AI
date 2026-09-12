@@ -11,7 +11,11 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    // CopilotKit v2's stylesheet ships a full dark palette behind a `.dark`
+    // class and defaults to light. Without this the chat renders correctly but
+    // almost invisibly — light text on a light surface over our dark shell,
+    // which looks like a broken panel rather than a theming problem.
+    <html lang="en" className="dark">
       <body>{<Providers>{children}</Providers>}</body>
     </html>
   );
