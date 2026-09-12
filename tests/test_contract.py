@@ -55,7 +55,7 @@ def fields_page_reads() -> set[str]:
 
 
 def run() -> Suite:
-    s = Suite("contract", expect_at_least=40)
+    s = Suite("contract", expect_at_least=52)
 
     written = fields_bot_writes()
     read = fields_page_reads()
@@ -88,7 +88,7 @@ def run() -> Suite:
     s.check("the page passes the constraints to the agent", "constraints_text" in PAGE_SRC)
 
     # Server and page must agree on the endpoint names.
-    for route in ("/pending", "/dial", "/outcome", "/config"):
+    for route in ("/pending", "/dial", "/outcome", "/config", "/turn", "/live", "/amend"):
         s.check(f"server serves {route}", f'"{route}"' in SERVER_SRC)
     for route in ("/pending", "/outcome", "/config"):
         s.check(f"page calls {route}", route in PAGE_SRC)
@@ -172,6 +172,41 @@ def run() -> Suite:
             "conversation_id" in PAGE_SRC and "conversationId" in PAGE_SRC)
     s.check("a derived outcome is labelled as derived in the chat message",
             "derived" in SERVER_SRC)
+
+    # --- the live transcript ----------------------------------------------
+    # Watching the call happen is what makes delegating it supervisable rather
+    # than an act of faith, and it is the moment a human can still intervene.
+    s.check("the call page pushes each turn as it happens", '"/turn"' in PAGE_SRC)
+    s.check("pushing a turn is fire-and-forget so a dropped turn cannot "
+            "interrupt a live phone call",
+            ".catch(() => {})" in PAGE_SRC)
+    s.check("the bridge opens a live message when dialling starts",
+            "send_telegram_returning_id" in SERVER_SRC and "live_message_id" in SERVER_SRC)
+    s.check("and edits it as turns arrive", "edit_telegram" in SERVER_SRC)
+    s.check("edits are throttled, because Telegram rate-limits them",
+            "_LIVE_EDIT_MIN_INTERVAL" in SERVER_SRC)
+    s.check("a throttled edit loses nothing: the whole transcript re-renders",
+            "render_live" in SERVER_SRC)
+    s.check("the live message is closed off when the call ends",
+            "finished=True" in SERVER_SRC)
+    s.check("a failed edit is survivable, not fatal",
+            "live edit skipped" in SERVER_SRC)
+    s.check("the rendered transcript distinguishes the restaurant from the agent",
+            SERVER_SRC.count('turn.get("source") == "user"') >= 1)
+    s.check("the live message is truncated to Telegram's limit",
+            "[:4000]" in SERVER_SRC)
+
+    # --- booking links ----------------------------------------------------
+    places_src = (ROOT / "places.py").read_text(encoding="utf-8")
+    exa_src = (ROOT / "exa_search.py").read_text(encoding="utf-8")
+    s.check("OSM's website tag is captured", "contact:website" in places_src)
+    s.check("a bare domain is made into a URL", 'startswith(("http://", "https://"))' in places_src)
+    s.check("Exa's URL fills in where OSM has no website", '"website"' in exa_src)
+    s.check("an Exa URL is never promoted to a phone number",
+            'fresh["phone"] = None' in exa_src)
+    s.check("the bot offers the booking page when it cannot call",
+            "booking page" in BOT_SRC)
+    s.check("and says a human has to finish it", "by hand" in BOT_SRC)
 
     # ---------------------------------------------------------------
     # The console contract.

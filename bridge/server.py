@@ -47,6 +47,13 @@ PORT = 8080
 
 _lock = threading.Lock()
 
+# Telegram rate-limits edits to a message, and a voice call produces a turn
+# every couple of seconds. Throttling here rather than dropping turns: each
+# edit re-renders the WHOLE transcript, so a skipped edit loses nothing except
+# a moment of latency.
+_LIVE_EDIT_MIN_INTERVAL = 1.3
+_last_live_edit = 0.0
+
 
 # --------------------------------------------------------------------------
 # pending_call.json — the one piece of shared state, deliberately on disk
@@ -167,6 +174,85 @@ def collect_outcome(body: dict) -> tuple[dict, str]:
         return derived, "transcript (derived)"
 
     return {}, "none"
+
+
+def edit_telegram(chat_id, message_id: int, text: str) -> bool:
+    token = env("TELEGRAM_TOKEN")
+    if not token or not chat_id or not message_id:
+        return False
+    payload = urllib.parse.urlencode({
+        "chat_id": str(chat_id), "message_id": str(message_id),
+        "text": text[:4000], "parse_mode": "HTML",
+    }).encode()
+    url = f"https://api.telegram.org/bot{token}/editMessageText"
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, data=payload), timeout=10
+        ) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, OSError, TimeoutError) as exc:
+        # "message is not modified" and rate limits both land here and are both
+        # harmless: the next turn re-sends the full transcript anyway.
+        print(f"[bridge] live edit skipped: {type(exc).__name__}")
+        return False
+
+
+def send_telegram_returning_id(chat_id, text: str):
+    token = env("TELEGRAM_TOKEN")
+    if not token or not chat_id:
+        return None
+    payload = urllib.parse.urlencode(
+        {"chat_id": str(chat_id), "text": text[:4000], "parse_mode": "HTML"}
+    ).encode()
+    url = f"https://api.telegram.org/bot{token}/sendMessage"
+    try:
+        with urllib.request.urlopen(
+            urllib.request.Request(url, data=payload), timeout=15
+        ) as resp:
+            return (json.loads(resp.read().decode("utf-8")).get("result") or {}).get("message_id")
+    except (urllib.error.URLError, OSError, TimeoutError, json.JSONDecodeError) as exc:
+        print(f"[bridge] could not open the live transcript message: {exc}")
+        return None
+
+
+def render_live(pending: dict, turns: list[dict], finished: bool = False) -> str:
+    """The message that updates in the chat while the call is happening.
+
+    Showing the conversation as it happens is not decoration. The group
+    delegated a phone call to an AI; watching it unfold is what makes that
+    delegation something they can supervise rather than just trust, and it is
+    the moment a human can say "no, that's wrong" while it still matters.
+    """
+    name = pending.get("restaurant_display") or pending.get("restaurant_name") or "the restaurant"
+    head = (f"\u2705 <b>Call finished \u2014 {name}</b>" if finished
+            else f"\U0001f4de <b>On the phone with {name}\u2026</b>")
+
+    # Built by concatenation rather than one big f-string: an escape inside an
+    # f-string expression is a syntax error before Python 3.12, and this has to
+    # run on whatever python3 the laptop happens to have.
+    dot = " \u00b7 "
+    subtitle = str(pending.get("dial_number") or "")
+    if pending.get("party_size"):
+        subtitle += dot + "party of " + str(pending["party_size"])
+    if pending.get("when_text"):
+        subtitle += dot + str(pending["when_text"])
+
+    lines = [head, "<i>" + subtitle + "</i>", ""]
+
+    if not turns:
+        lines.append("<i>connecting\u2026</i>")
+    for turn in turns[-24:]:
+        said = str(turn.get("message", "")).strip()
+        if not said:
+            continue
+        if turn.get("source") == "user":
+            lines.append(f"\U0001f3ea <b>{said}</b>")      # the restaurant
+        else:
+            lines.append(f"\U0001f916 {said}")             # our agent
+
+    if not finished:
+        lines.append("\n<i>live \u2014 this message updates as they talk</i>")
+    return "\n".join(lines)
 
 
 def format_outcome(pending: dict, body: dict) -> str:
@@ -299,6 +385,10 @@ class Handler(BaseHTTPRequestHandler):
             self._file(HERE / "call_page.html", "text/html; charset=utf-8")
         elif route == "/health":
             self._json({"ok": True, "service": "shum-ai-bridge", "port": PORT})
+        elif route == "/live":
+            pending = read_pending()
+            self._json({"turns": pending.get("live_turns") or [],
+                        "status": pending.get("status")})
         elif route == "/config":
             agent_id = env("ELEVENLABS_AGENT_ID")
             self._json(
@@ -327,13 +417,50 @@ class Handler(BaseHTTPRequestHandler):
             if not pending.get("dial_number"):
                 self._json({"error": "pending has no dial_number"}, 409)
                 return
-            self._json(patch_pending(dial=True, status="dialing"))
+            # Open the live transcript message now, so the group sees the call
+            # start rather than only its result.
+            live_id = send_telegram_returning_id(
+                pending.get("chat_id"), render_live(pending, [])
+            )
+            self._json(patch_pending(
+                dial=True, status="dialing", live_message_id=live_id, live_turns=[]
+            ))
+
+        elif route == "/turn":
+            # One conversational turn, pushed from the call page as it happens.
+            global _last_live_edit
+            pending = read_pending()
+            said = str(body.get("message") or "").strip()
+            if not said:
+                self._json({"ok": True, "ignored": "empty turn"})
+                return
+
+            turns = list(pending.get("live_turns") or [])
+            turns.append({"source": body.get("source") or "ai", "message": said})
+            patch_pending(live_turns=turns)
+
+            edited = False
+            now = time.time()
+            if now - _last_live_edit >= _LIVE_EDIT_MIN_INTERVAL:
+                _last_live_edit = now
+                edited = edit_telegram(
+                    pending.get("chat_id"), pending.get("live_message_id"),
+                    render_live(pending, turns),
+                )
+            self._json({"ok": True, "turns": len(turns), "edited": edited})
 
         elif route == "/outcome":
             pending = read_pending()
             collected, source = collect_outcome(body)
             body["collected"] = collected
             body["outcome_source"] = source
+
+            # Close the live message off so it does not sit there saying
+            # "live" forever, then post the structured result separately.
+            turns = body.get("transcript") or pending.get("live_turns") or []
+            if pending.get("live_message_id"):
+                edit_telegram(pending.get("chat_id"), pending["live_message_id"],
+                              render_live(pending, turns, finished=True))
 
             archived = archive_call(pending, body)
             text = format_outcome(pending, body)

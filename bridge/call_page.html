@@ -259,6 +259,15 @@ async function startAgent() {
       onMessage: ({ message, source }) => {
         state.transcript.push({ source, message, at: new Date().toISOString() });
         log(source === "user" ? "them" : "ai", `${source === "user" ? "restaurant" : "agent"}: ${message}`);
+        // Push it to the bridge immediately so the group watches the call
+        // happen instead of waiting for a summary. Fire and forget: a dropped
+        // turn must never interrupt a live phone call, and the bridge
+        // re-renders the whole transcript on the next one anyway.
+        fetch("/turn", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ source, message }),
+        }).catch(() => {});
       },
     });
   } catch (err) {
