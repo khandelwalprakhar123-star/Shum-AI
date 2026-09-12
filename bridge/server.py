@@ -16,7 +16,7 @@ Endpoints
   GET  /         -> call_page.html
 
 The last one matters more than it looks. getUserMedia is refused on file://
-(gotcha 12), so the page MUST arrive over http://localhost. Serving it from the
+so the page MUST arrive over http://localhost. Serving it from the
 same origin as the API also means the browser never needs a CORS preflight for
 the calls that matter.
 """
@@ -365,7 +365,7 @@ class Handler(BaseHTTPRequestHandler):
 
     # Only needed by the optional CopilotKit console on :3000. Missing CORS
     # headers surface as a bare "Failed to fetch" with no explanation at all
-    # (gotcha 23), so they go in now rather than being debugged later.
+    # so they go in now rather than being debugged later.
     # Access-Control-Allow-Origin: * was applied to /dial, /outcome, /cancel and
     # /amend. Those endpoints take no credentials, so a wildcard meant ANY page
     # the operator happened to have open could arm a queued call or post text
@@ -489,7 +489,7 @@ class Handler(BaseHTTPRequestHandler):
             # silence. Acoustic coupling needs two devices with air between
             # them, which means the dialling device cannot be the laptop.
             #
-            # So brief section 9.2's two humans -- one approving, one dialling
+            # So the rule of two humans -- one approving, one dialling
             # -- is not a compromise here. It is the only topology where the
             # audio works at all.
             print("[bridge] approved - dial the number by hand and put it on speakerphone")

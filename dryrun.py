@@ -96,12 +96,25 @@ def main() -> int:
     print(strip_html(pipeline.render_constraints(constraints)))
 
     print(f"\n{BOLD}2. Finding candidates{RESET}")
-    osm = timed("overpass", places.search_places)
+    # The same three steps, in the same order, as handle_decide(): pick the
+    # districts from the constraints, take the WHOLE pool, then rank by those
+    # districts and cut. Doing any of it differently would make this script's
+    # "exactly what /decide does" claim a lie, which is worse than not having
+    # the script -- it is what people evaluate the repo with.
+    wanted_areas = places.areas_for(constraints)
+    osm = timed("overpass", places.search_places, wanted_areas, None)
     exa = timed("exa", exa_search.search, constraints)
-    candidates = exa_search.merge(osm, exa)
+    candidates = places.relevance_rank(exa_search.merge(osm, exa), constraints)[:60]
     callable_n = sum(1 for c in candidates if c.get("phone"))
+    origins = places.origin_districts(constraints)
+    destinations = places.destination_districts(constraints)
     print(f"  {len(osm)} from OpenStreetMap, {len(exa)} from Exa, "
-          f"{len(candidates)} merged, {GREEN}{callable_n} callable{RESET}")
+          f"{len(candidates)} ranked, {GREEN}{callable_n} callable{RESET}")
+    print(f"  {DIM}districts searched: {', '.join(wanted_areas)}{RESET}")
+    if origins and not destinations:
+        fair = places.meeting_districts(origins)[:3]
+        print(f"  {DIM}nobody named a destination, so the fair middle between "
+              f"{', '.join(origins)} is {', '.join(fair)}{RESET}")
     if exa:
         print(f"  {DIM}Exa query: {exa_search.build_query(constraints)[:100]}...{RESET}")
 
@@ -110,6 +123,9 @@ def main() -> int:
     print(f"  {DIM}source: {proposal.get('source')}{RESET}\n")
 
     for index, pick in enumerate(proposal.get("picks", []), 1):
+        if not pick.get("name"):
+            print(f"  {YELLOW}{index}. (a pick came back with no name - skipped){RESET}")
+            continue
         phone = pick.get("phone") or f"{YELLOW}no number - cannot be called{RESET}"
         print(f"  {BOLD}{index}. {pick['name']}{RESET}"
               f"{(' · ' + pick['area']) if pick.get('area') else ''}")

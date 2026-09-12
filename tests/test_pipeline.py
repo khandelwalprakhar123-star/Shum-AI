@@ -137,7 +137,7 @@ def run() -> Suite:
     s.eq("party size of 300 is rejected as a misread", pipeline._clean_int(300), None)
     s.eq("budget of 5 is rejected as not-a-meal", pipeline._clean_money(5), None)
 
-    # --- gotcha 11: str.format() on a prompt containing literal JSON -------
+    # --- str.format() on a prompt containing literal JSON ------------------
     # This failed SILENTLY into the fallback and served generic output forever.
     # The defence is structural, so it is tested structurally.
     s.check("extract prompt carries literal JSON braces", '{"' in pipeline.EXTRACT_PROMPT)

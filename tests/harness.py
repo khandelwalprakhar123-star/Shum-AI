@@ -10,7 +10,7 @@ raises on anything unqueued. A test that accidentally reaches Gemini fails
 loudly instead of passing slowly.
 
 The other thing this gives us is an honest tally. A skipped test is not a
-passing test (brief gotcha 25): the four outcomes are counted separately and
+passing test: the four outcomes are counted separately and
 the runner treats fail, crash AND skip as reasons to exit non-zero.
 """
 
@@ -112,7 +112,7 @@ def overpass_ok(elements):
 # auto-starts the agent on exactly that transition.
 #
 # A test run placing a phone call with nobody pressing anything violates brief
-# section 9.2, and it happened while the runner printed "network fully mocked".
+# the two-human rule, and it happened while the runner printed "network fully mocked".
 # Proven from this machine's bridge log: two POST /dial 409 entries with no
 # human involved; they were 409 only because nothing was queued at the time.
 #

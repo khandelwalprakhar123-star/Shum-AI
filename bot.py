@@ -221,7 +221,7 @@ def load_state() -> int:
 
 
 # ===========================================================================
-# Safety rails (brief §9). These are not polish.
+# Safety rails. These are not polish.
 # ===========================================================================
 
 def resolve_dial_target(real_phone: str | None) -> tuple[str | None, bool, str | None]:
@@ -684,7 +684,9 @@ HELP = (
     "with a voice agent and book it.\n\n"
     "/decide — read the chat and propose three\n"
     "/close — close the poll, pick the winner, ask to call\n"
-    "/status — what I've read and what I know\n\n"
+    "/status — what I've read and what I know\n"
+    "/who — every preference I remember, with the quote it came from\n"
+    "/forget NAME — drop someone; /forget all wipes it\n\n"
     "<i>I can only see messages sent after I joined. Just talk normally; I'm reading.</i>"
 )
 

@@ -12,7 +12,7 @@ Repo: <https://github.com/khandelwalprakhar123-star/Shum-AI>
 
 Shum-AI lives in a Telegram group chat, reads the argument, and then actually phones the restaurant.
 
-Recommendation is solved; *converging* is not. The agent has read the last two hundred messages, so it knows who doesn't eat pork, who commutes from Sha Tin, and what got vetoed last month — none of which would ever be typed into a form. It runs a native poll with a deadline so a decision gets made, searches the districts that minimise the **worst** journey rather than the average, and then closes the loop offline: no Hong Kong booking platform has a public write API, so an ElevenLabs agent over WebRTC talks to a real phone on speakerphone, with the transcript streaming back into the chat live. A confirmed table posts one calendar link everybody taps. 671 checks, network fully mocked.
+Recommendation is solved; *converging* is not. The agent has read the last two hundred messages, so it knows who doesn't eat pork, who commutes from Sha Tin, and what got vetoed last month — none of which would ever be typed into a form. It runs a native poll with a deadline so a decision gets made, searches the districts that minimise the **worst** journey rather than the average, and then closes the loop offline: no Hong Kong booking platform has a public write API, so an ElevenLabs agent over WebRTC talks to a real phone on speakerphone, with the transcript streaming back into the chat live. A confirmed table posts one calendar link everybody taps. 753 checks, network fully mocked.
 
 ### Full version
 
@@ -27,7 +27,7 @@ It also supplies the two primitives a group chat lacks. First, a decision: a nat
 
 Then it closes the loop offline. No Hong Kong booking platform exposes a self-serve write API, so rather than fake the last step, an ElevenLabs voice agent runs in a browser tab over WebRTC while a human dials and puts the phone on speaker — acoustic coupling, real +852 caller ID, no Twilio number, no public tunnel to die mid-demo. The transcript streams back into the chat turn by turn, so the delegation is supervised rather than an act of faith. When the table is confirmed the agent posts a Google Calendar link anyone can tap — Telegram doesn't hand out member emails, so there is nobody to send an invite *to*, and a link needs no addresses, no OAuth and no account. It is withheld unless a real date **and** a real clock time were pinned down: a dinner filed at a guessed hour is wrong in six pockets until everybody is late.
 
-**Stack.** Stdlib-only Python bot on the Telegram Bot API; Gemini for constraint extraction and selection with an OpenRouter fallback and a keyless regex floor; Overpass/OpenStreetMap for real phone numbers; Exa for semantic discovery (an enhancement, never a dependency — every failure path returns `[]`); ElevenLabs Agents over WebRTC; a Next.js + CopilotKit v2 operator console whose `useHumanInTheLoop` approval *is* the suspended tool call — `place_call` has no handler, so the model structurally cannot dial alone. **671 checks, network fully mocked.** `/decide` answers in ~8 seconds.
+**Stack.** Stdlib-only Python bot on the Telegram Bot API; Gemini for constraint extraction and selection with an OpenRouter fallback and a keyless regex floor; Overpass/OpenStreetMap for real phone numbers; Exa for semantic discovery (an enhancement, never a dependency — every failure path returns `[]`); ElevenLabs Agents over WebRTC; a Next.js + CopilotKit v2 operator console whose `useHumanInTheLoop` approval *is* the suspended tool call — `place_call` has no handler, so the model structurally cannot dial alone. **753 checks, network fully mocked.** `/decide` answers in ~8 seconds.
 
 ---
 
@@ -57,7 +57,7 @@ The native Telegram poll, with a deadline and a default.
 
 ### 0:55 – 1:25 · The part everyone skips
 
-The approval card. Tap approve. The phone rings. Pick it up, speakerphone on, transcript appears in the chat turn by turn.
+The approval card. Tap approve. Dial the restaurant on your phone, speakerphone on beside the laptop; the transcript appears in the chat turn by turn.
 
 > **"Now the hard part. No Hong Kong booking platform has a public write API — so most demos stop here and call it 'integration pending'. We phone them. An ElevenLabs agent over WebRTC, a human dials, speakerphone next to the laptop mic. Real +852 caller ID, no Twilio number. It says it's an AI in the first sentence. And the transcript comes back into the chat live, so this is supervised delegation, not faith."**
 
@@ -71,7 +71,7 @@ Confirmation card: time, party size, name. Tap the calendar link; the event open
 
 Show `CONSENTED_NUMBERS`, then the console: `place_call` with a `render` and no handler.
 
-> **"It can only dial an allowlisted number, a human approves every call, and in the console the approval *is* the suspended tool call — `place_call` has no handler. The model structurally cannot dial on its own. 671 checks, network fully mocked."**
+> **"It can only dial an allowlisted number, a human approves every call, and in the console the approval *is* the suspended tool call — `place_call` has no handler. The model structurally cannot dial on its own. 753 checks, network fully mocked."**
 
 **Shot list to capture (in this order, before anything else):**
 
@@ -90,7 +90,7 @@ Show `CONSENTED_NUMBERS`, then the console: `place_call` with a `render` and no 
 > Built at @aitinkerers **Agents, Everywhere** — Hong Kong site, @Cyberport.
 > Discovery by @exaailabs · reasoning on Google @GeminiApp · operator console on @CopilotKit
 >
-> 671 checks, network fully mocked. Repo below. 👇
+> 753 checks, network fully mocked. Repo below. 👇
 >
 > #AgentsEverywhere #AITinkerers #HongKong
 
@@ -100,4 +100,10 @@ Show `CONSENTED_NUMBERS`, then the console: `place_call` with a `render` and no 
 
 ## 4. Backup footage
 
-Archived under `call_log/` — every call is written to disk with its full transcript and structured outcome, so if the live call fails on stage there is real footage of a successful one. The 14:06 HKT call: 130 seconds, 13 turns, `call_successful: success`, table for two at 14:00 under Prakhar.
+Archived under `call_log/` — every call is written to disk with its full transcript and structured
+outcome, so if the live call fails on stage there is real footage of a successful one.
+
+Two successful calls on 12 Sep:
+
+- **14:06** — 130 seconds, 13 turns, table for two at 14:00 under Prakhar.
+- **15:14** — the restaurant *refused the requested time and offered another*, and the agent took it: asked for 8pm, was told eight was reserved and 8:30 was free, confirmed 8:30, and separately got "we have egg options for the vegetarian" recorded against the group's vegetarian constraint. Outcome: `confirmed`, `20:30`, party of 6, under Prakhar. That is the call worth showing — a happy path proves the plumbing, a renegotiated time proves the agent is listening.

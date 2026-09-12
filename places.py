@@ -491,7 +491,7 @@ def dedupe_and_rank(rows: list[dict]) -> list[dict]:
 SEED_PLACES: list[dict] = [
     # NAMES ONLY. Every phone is deliberately None.
     #
-    # Brief §9.6: never invent a phone number. That rail applies to the author
+    # Never invent a phone number. That rail applies to the author
     # of this file as much as to the model. These are well-known Hong Kong
     # restaurants whose names are useful as a last-resort candidate set, but the
     # digits are NOT hand-typed from memory here, because a number that is

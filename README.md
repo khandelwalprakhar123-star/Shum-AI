@@ -90,11 +90,11 @@ Stated plainly, because a mocked final step is the most common way a demo gets m
 - The phone call. A real number rings, a real human answers, the agent holds the conversation, and the transcript goes back into the chat.
 
 **Honest limitations:**
-- **OpenStreetMap phone coverage is about 20%.** Measured: 1,199 named places across HK Island north shore and Kowloon, 156 with a usable phone number. Phone-bearing rows are therefore sorted first everywhere — a recommendation you cannot dial is worthless to this agent.
+- **OpenStreetMap phone coverage is about one place in five.** Measured on the cache this repo builds: 602 named restaurants across HK Island north shore, Kowloon and the New Territories spine, 125 of them with a phone number that normalises to a dialable +852 — 21%. Phone-bearing rows are therefore sorted first everywhere — a recommendation you cannot dial is worthless to this agent.
 - **A human dials.** The agent does not place the call itself; it speaks once a person has connected it. That's a safety decision, not a missing feature.
 - **The agent speaks English and understands Cantonese.** ElevenLabs Scribe does Cantonese speech-to-text at 5.9% WER (vs Whisper large-v3 at 13.2%), but ElevenLabs TTS has no Cantonese voice at all — the model list has Mandarin and no Yue. So: English out, Cantonese in. That is how a large share of Hong Kong service calls already run.
 - **Exa is an enhancement, never a dependency.** Every failure path returns `[]`. It finds names; OpenStreetMap makes them callable.
-- The CopilotKit operator console is not built. It was scoped as optional and the core came first.
+- **The operator console is a second front end, not the primary one.** It builds and type-checks clean, and its approval step *is* the suspended tool call — `place_call` has a `render` and no handler, so the model cannot dial on its own. But the Telegram flow is the one that has been driven end to end against real restaurants; the console has not.
 
 **Not used, deliberately:** OpenRice. Its `robots.txt` names `GPTBot`, `PerplexityBot`, `meta-externalagent` and `Bytespider` and disallows the JSON service endpoints, and its terms forbid using *"any robot, any automatic device or manual process to monitor or copy the Channels."* A hackathon submission is a public repo and a live stage demo. Don't.
 
@@ -108,6 +108,19 @@ Not optional polish. These are the difference between a good demo and an irrespo
 4. **`DEMO_PHONE` routes every call to a number you control**, whichever restaurant won the poll. The approval card and the call page both say so out loud.
 5. **No invented phone numbers, anywhere.** The model is explicitly forbidden from emitting one, and `_rehydrate()` in `pipeline.py` structurally drops any phone field the model returns — the digits that get dialled come only from OpenStreetMap. The offline seed list in `places.py` carries names with `phone: None` rather than numbers typed from memory.
 6. **If it books a real table, turn up or cancel it.**
+
+**Every switch, and what it does**
+
+| Variable | Default | Effect |
+|---|---|---|
+| `CONSENTED_NUMBERS` | empty | Comma-separated allowlist. A booking for anything not on it is refused at the approval gate. |
+| `DEMO_PHONE` | empty | Routes *every* call to this number whatever won the poll. Both the approval card and the call page say so out loud, and a calendar entry made under it is labelled a rehearsal. |
+| `ALLOW_ANY_NUMBER` | `0` | Disables the allowlist. Leave it alone. It exists so that turning the rail off is a deliberate, greppable act rather than a code edit. |
+| `NO_AUTO_OPEN` | unset | Stops the bridge opening the call desk in your browser on start. Set it and you must open `http://localhost:8080/` yourself — if you forget, an approved call rings a phone with no agent on the line. |
+| `CONSOLE_ORIGIN` | `http://localhost:3000` | The single origin allowed through CORS. Not a wildcard. |
+| `ELEVENLABS_API_KEY` | empty | Optional. Lets the bridge read the agent's own post-call analysis; without it the outcome is derived from the transcript instead, and the chat message says which. |
+
+There is no auto-dial switch. There was one, and it worked; it was removed because it put the call's audio on the same machine as the agent, where each end's echo cancellation deletes the signal the other needs. A human dials.
 
 ## Setup
 
@@ -131,7 +144,8 @@ python3 places.py --refresh-cache
 
 **If you are on macOS with Python from python.org, run this once:**
 ```bash
-open "/Applications/Python 3.14/Install Certificates.command"
+# Use YOUR version, not this one — the folder is named after it:
+open "/Applications/Python $(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')/Install Certificates.command"
 ```
 That installer does not wire Python into the system keychain — it expects a `cert.pem` it never creates. The symptom is vicious: `curl https://...` works perfectly while *every* `urllib` call in the same shell dies with `CERTIFICATE_VERIFY_FAILED`. Since every network call here goes through `urllib`, nothing works at all, and the error points at certificates rather than the one-line fix. Both `bot.py` and `bridge/server.py` now check the trust store at startup and print the exact command if it's empty.
 
@@ -171,6 +185,10 @@ Add the bot to a group chat, argue normally, then:
 - `/decide` — reads the history, posts the constraints it found *with the quotes they came from*, proposes three places, opens a poll
 - `/close` — closes the poll, names the winner, asks a human to approve the call
 - `/status` — what it has read and which safety rail is active
+- `/who` — every preference it remembers, per person, with the quote each one came from
+- `/forget NAME` — drop one person; `/forget all` wipes the lot
+
+Memory is inspectable and correctable on purpose. Nothing is remembered without both a named speaker and the words they used, and `/who` shows you the words.
 
 On the call page: **Arm microphone** → confirm the level bar moves → dial → speakerphone → **Start agent**.
 
@@ -211,9 +229,7 @@ python3 tests/run.py
 
 The network is mocked entirely — no Telegram, no Gemini, no Overpass, no Exa — and the *real* code is driven against it. The runner exits non-zero on failure, crash **or skip**: a suite silently not running while the report says "0 failed" is worse than a red.
 
-## Stack
-
-### Measured latency of one `/decide`
+## Measured latency of one `/decide`
 
 | Stage | Time |
 |---|---|

@@ -712,7 +712,7 @@ def propose(constraints: dict, candidates: list[dict]) -> dict:
 def _rehydrate(model_picks, candidates: list[dict]) -> list[dict]:
     """Match names back to real candidate rows and attach the REAL phone number.
 
-    The model is never trusted with a phone number. Brief §9.6: never invent a
+    The model is never trusted with a phone number. Never invent a
     phone number. The structural guarantee is that the digits we dial only ever
     come from OpenStreetMap, and this function is where that is enforced — any
     phone field the model emitted is dropped on the floor.
