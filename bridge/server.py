@@ -588,34 +588,64 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("[bridge] %s\n" % (fmt % args))
 
 
+def _telephony_running() -> bool:
+    """Is an app that owns the tel: scheme up right now?
+
+    On macOS 26 there is no Phone.app -- FaceTime.app claims tel:, telephony:
+    and facetime-audio: (verified with lsregister on the build machine). Older
+    macOS shipped a separate Phone.app, so both are checked.
+    """
+    for app in ("FaceTime", "Phone"):
+        try:
+            if subprocess.run(["pgrep", "-x", app], capture_output=True).returncode == 0:
+                return True
+        except (OSError, FileNotFoundError):
+            return False
+    return False
+
+
 def dial_phone(number: str) -> tuple[bool, str]:
     """Ring the operator's own phone, automatically, for free.
 
-    macOS hands a `tel:` URL to whichever app owns telephony -- on current
-    macOS that is Phone.app, which places the call through a paired iPhone over
-    Continuity. So the call goes out on the operator's real +852 cellular line:
-    no telephony provider, no purchased number, no regulatory bundle, no cost,
-    and the local caller ID that is the entire reason a Hong Kong restaurant
-    picks up.
+    macOS hands a `tel:` URL to whichever app owns telephony. On macOS 26 that
+    is FaceTime.app, which places the call through a paired iPhone over
+    Continuity -- so the call goes out on the operator's real +852 cellular
+    line: no telephony provider, no purchased number, no regulatory bundle, no
+    cost, and the local caller ID that is the entire reason a Hong Kong
+    restaurant picks up.
 
     This changes nothing about the transcript. The agent still runs in the call
     page over WebRTC and still hears through the laptop microphone. All it
     removes is a human tapping digits.
 
-    TWO BUGS LIVED HERE, both of which reported success:
+    NOT `facetime-audio:`. Measured, 12 Sep 14:52: that URL exits 0, spins up
+    the FaceTime notification services, opens no window, writes no call-history
+    row, and rings nothing -- because FaceTime Audio can only reach a number
+    registered with FaceTime, and a restaurant's landline never is. It also
+    would not carry a +852 caller ID if it did connect. It is a dead end that
+    looks like it worked, which is the worst kind.
+
+    THREE BUGS LIVED HERE, all of which reported success:
 
     1. The URL was "tel://<number>". That is not the tel: scheme -- tel takes no
        authority component -- and nothing on the system claims it. Measured:
-       "tel://" launched no handler at all, while "tel:" launched Phone.app in
-       1.2 seconds.
+       "tel://" launched no handler at all, while "tel:" launched the handler
+       in 1.2 seconds.
     2. Success was the return value of subprocess.Popen, which only says a
        process was spawned. `open` exits 0 whether or not any application
        handles the URL, so a dial that went nowhere reported "dialled: True".
+    3. The check was "is a telephony app running?" -- but FaceTime STAYS OPEN
+       after a call, so on the second dial onwards the check passed instantly
+       without the handoff having landed at all. Caught live: FaceTime was
+       already up, and the function would have confirmed a dial it had no
+       evidence for. A test that cannot fail is not a test.
 
-    So it now uses tel: and CONFIRMS a telephony app actually came up before
-    claiming anything. Whether that app then connects the call depends on
-    "Calls from iPhone" being enabled and the iPhone being nearby -- which this
-    process cannot see, and does not pretend to.
+    So the process state is now sampled BEFORE the handoff, and a launch only
+    counts as evidence if the app was not already there. When it was already
+    running this function says it cannot verify, rather than inventing a
+    confirmation. Whether the call then connects depends on "Calls on Other
+    Devices" and the iPhone being nearby -- which this process cannot see, and
+    does not pretend to.
     """
     if sys.platform != "darwin":
         return False, f"auto-dial is macOS-only (this is {sys.platform})"
@@ -625,36 +655,37 @@ def dial_phone(number: str) -> tuple[bool, str]:
         return False, "no number to dial"
     masked = digits[:-4] + "****" if len(digits) > 4 else "****"
 
+    # Sample BEFORE the handoff. Without this, an already-open FaceTime makes
+    # every dial look successful.
+    was_running = _telephony_running()
+
     try:
-        # tel:, not tel:// -- see above.
+        # tel:, not tel:// and not facetime-audio: -- see above.
         subprocess.Popen(["open", f"tel:{digits}"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     except (OSError, FileNotFoundError) as exc:
         return False, f"could not hand off the call: {exc}"
 
-    # Confirm a telephony app actually took it. Without this the caller cannot
-    # tell "the phone is ringing" from "nothing happened".
+    if was_running:
+        # Honest answer: the handoff was made, and the one piece of evidence
+        # available here was already true before we started.
+        return True, (f"handed {masked} to FaceTime, which was already open - "
+                      "so this cannot be verified from here. Watch the phone.")
+
     for _ in range(8):
         time.sleep(0.4)
-        try:
-            running = subprocess.run(["pgrep", "-x", "Phone"], capture_output=True).returncode == 0
-            if not running:
-                running = subprocess.run(["pgrep", "-x", "FaceTime"],
-                                         capture_output=True).returncode == 0
-        except (OSError, FileNotFoundError):
-            return True, f"handed tel:{masked} to the system (could not verify)"
-        if running:
-            # Deliberately NOT "dialling". Phone.app coming up proves the
-            # handoff landed, not that a call was placed: on a Mac whose iPhone
-            # has "Calls on Other Devices" switched off, Phone.app opens and
-            # then says "iPhone Calls Not Available - your iPhone is not
-            # configured". Observed on the build machine. This process cannot
-            # see that banner, so it does not claim more than it knows.
-            return True, (f"handed {masked} to the Phone app - watch the phone. "
+        if _telephony_running():
+            # Deliberately NOT "dialling". FaceTime coming up proves the handoff
+            # landed, not that a call was placed: on a Mac whose iPhone has
+            # "Calls on Other Devices" switched off, it opens and then says
+            # "iPhone Calls Not Available - your iPhone is not configured".
+            # Observed on the build machine. This process cannot see that
+            # banner, so it does not claim more than it knows.
+            return True, (f"handed {masked} to FaceTime - watch the phone. "
                           "If nothing rings, iPhone > Settings > Cellular > "
                           "Calls on Other Devices needs to be on for this Mac.")
 
-    return False, (f"handed tel:{masked} to the system but no telephony app came up. "
+    return False, (f"handed {masked} to the system but no telephony app came up. "
                    "Dial by hand; the number is on the approval card.")
 
 

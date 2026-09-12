@@ -55,7 +55,7 @@ def fields_page_reads() -> set[str]:
 
 
 def run() -> Suite:
-    s = Suite("contract", expect_at_least=70)
+    s = Suite("contract", expect_at_least=95)
 
     written = fields_bot_writes()
     read = fields_page_reads()
@@ -239,6 +239,105 @@ def run() -> Suite:
             'dial_phone(pending.get("dial_number")' in SERVER_SRC)
     s.check("the trade-off against brief 9.2 is written down where it is made",
             "one gate, not two" in SERVER_SRC)
+
+    # tel: is handled by FaceTime.app on macOS 26 -- there is no Phone.app --
+    # so the code must not name an app that does not exist.
+    s.check("it looks for FaceTime, which owns tel: on current macOS",
+            '"FaceTime"' in SERVER_SRC)
+    # facetime-audio: exits 0, opens nothing, logs nothing and rings nothing
+    # unless the callee is FaceTime-registered, which a restaurant never is.
+    s.check("it does NOT use facetime-audio:, which silently reaches nothing",
+            "facetime-audio:{" not in SERVER_SRC
+            and 'f"facetime-audio:' not in SERVER_SRC)
+    s.check("and the dead end is written down so nobody retries it",
+            "facetime-audio" in SERVER_SRC and "rings nothing" in SERVER_SRC)
+    # The bug this test exists for: FaceTime stays open after a call, so
+    # "is it running?" was already true on every dial after the first.
+    s.check("telephony state is sampled BEFORE the hand-off",
+            "was_running = _telephony_running()" in SERVER_SRC)
+    s.check("an already-open FaceTime is reported as unverifiable, not as success",
+            "cannot be verified from here" in SERVER_SRC)
+
+    # --- auto-dial, actually executed -------------------------------------
+    #
+    # Everything above reads the source. These run the function, because the
+    # defect that shipped was behavioural: the check passed when it had no
+    # evidence, and no amount of grepping would have caught that.
+    import bridge.server as server  # noqa: PLC0415
+
+    class FakeProc:
+        """Records `open` invocations instead of launching anything."""
+
+        def __init__(self, running_before: bool, comes_up: bool):
+            self.calls: list[list[str]] = []
+            self._running = running_before
+            self._comes_up = comes_up
+
+        def popen(self, argv, **_kw):
+            self.calls.append(list(argv))
+            if self._comes_up:
+                self._running = True          # the app launches, as it would
+            return object()
+
+        def run(self, argv, **_kw):
+            class R:
+                pass
+            r = R()
+            # pgrep -x <app>: 0 means running.
+            r.returncode = 0 if self._running and argv[-1] == "FaceTime" else 1
+            return r
+
+    def dial_with(running_before: bool, comes_up: bool, number="+85260894121",
+                  platform="darwin"):
+        fake = FakeProc(running_before, comes_up)
+        saved = (server.sys.platform, server.subprocess.Popen,
+                 server.subprocess.run, server.time.sleep)
+        server.sys.platform = platform
+        server.subprocess.Popen = fake.popen
+        server.subprocess.run = fake.run
+        server.time.sleep = lambda _s: None      # no real waiting in a test
+        try:
+            return server.dial_phone(number), fake
+        finally:
+            (server.sys.platform, server.subprocess.Popen,
+             server.subprocess.run, server.time.sleep) = saved
+
+    (ok, why), fake = dial_with(running_before=False, comes_up=True)
+    s.check("a clean launch is a confirmed hand-off", ok is True)
+    s.contains("...and still only claims a hand-off", why, "watch the phone")
+    s.eq("the URL is the tel: scheme", fake.calls[0], ["open", "tel:+85260894121"])
+
+    (ok, why), _ = dial_with(running_before=True, comes_up=True)
+    s.check("an already-open FaceTime still hands off", ok is True)
+    s.contains("...but refuses to call it verified", why, "cannot be verified")
+    s.check("...and does not pretend the phone is ringing",
+            "If nothing rings" not in why)
+
+    (ok, why), fake = dial_with(running_before=False, comes_up=False)
+    s.check("nothing coming up is a FAILURE, not a success", ok is False,
+            "`open` exits 0 even when no application handles the URL")
+    s.contains("...and it says what to do instead", why, "Dial by hand")
+    s.eq("it still tried exactly once", len(fake.calls), 1)
+
+    (ok, why), fake = dial_with(running_before=False, comes_up=True,
+                                platform="linux")
+    s.check("non-macOS degrades instead of raising", ok is False)
+    s.contains("...naming the platform it got", why, "linux")
+    s.eq("and it dials nothing at all", fake.calls, [])
+
+    (ok, why), fake = dial_with(running_before=False, comes_up=True, number="")
+    s.check("an empty number is refused", ok is False)
+    s.eq("...before any hand-off", fake.calls, [])
+
+    (ok, why), _ = dial_with(running_before=False, comes_up=True)
+    s.check("the number is masked in the returned message",
+            "60894121" not in why and "****" in why,
+            "the bridge log is on screen during the demo")
+
+    for bad in ("facetime-audio:", "tel://"):
+        _, fake = dial_with(running_before=False, comes_up=True)
+        s.check(f"it never emits {bad}",
+                not any(bad in part for call in fake.calls for part in call))
 
     # --- booking links ----------------------------------------------------
     places_src = (ROOT / "places.py").read_text(encoding="utf-8")
