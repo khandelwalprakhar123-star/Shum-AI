@@ -82,6 +82,7 @@ CHAT_SENTINEL = "@@CHAT_HISTORY@@"
 CANDIDATES_SENTINEL = "@@CANDIDATES@@"
 CONSTRAINTS_SENTINEL = "@@CONSTRAINTS@@"
 TRANSCRIPT_SENTINEL = "@@TRANSCRIPT@@"
+KNOWN_SENTINEL = "@@KNOWN_PEOPLE@@"
 
 
 class ModelUnavailable(RuntimeError):
@@ -334,6 +335,12 @@ Rules:
 - "coming from X" is a travel constraint, not a location preference. Record the origin, not a district to search.
 - If the group never said how many people or when, leave those null. Do not invent them.
 
+ALREADY ESTABLISHED about these people from earlier conversations. Treat this as true unless
+this chat contradicts it, and carry it into your answer with the ORIGINAL quote where you have
+none from today. If someone contradicts their own past constraint, believe today and say so in
+open_questions.
+@@KNOWN_PEOPLE@@
+
 Return ONLY this JSON shape:
 {
   "party_size": null,
@@ -354,13 +361,24 @@ CHAT:
 """
 
 
-def extract_constraints(chat_text: str) -> dict:
-    """Read the conversation. Return constraints with the evidence attached."""
+def extract_constraints(chat_text: str, known: str = "") -> dict:
+    """Read the conversation. Return constraints with the evidence attached.
+
+    `known` is what the agent already remembers about these people from earlier
+    conversations. Passing it in rather than merging afterwards is deliberate:
+    the model can then reconcile a standing constraint against today's chat and
+    tell us when someone has contradicted themselves, which a post-hoc union of
+    two dicts cannot do.
+    """
     chat_text = (chat_text or "").strip()
     if not chat_text:
         return _empty_constraints("no chat history yet")
 
-    prompt = EXTRACT_PROMPT.replace(CHAT_SENTINEL, chat_text[-14000:])
+    prompt = (
+        EXTRACT_PROMPT
+        .replace(CHAT_SENTINEL, chat_text[-14000:])
+        .replace(KNOWN_SENTINEL, known.strip() or "(nothing remembered yet \u2014 first time with this group)")
+    )
     try:
         parsed, provider = _generate(prompt)
     except ModelUnavailable:
@@ -711,6 +729,7 @@ def _rehydrate(model_picks, candidates: list[dict]) -> list[dict]:
         out.append({
             "name": match.get("name") or name,
             "phone": match.get("phone"),          # from OSM, never from the model
+            "website": match.get("website"),      # likewise: data, not model output
             "area": match.get("area") or str(pick.get("area") or ""),
             "cuisine": match.get("cuisine") or "",
             "why": str(pick.get("why") or "").strip(),
@@ -785,6 +804,7 @@ def heuristic_picks(constraints: dict, candidates: list[dict]) -> dict:
             {
                 "name": c.get("name"),
                 "phone": c.get("phone"),
+                "website": c.get("website"),
                 "area": c.get("area") or "",
                 "cuisine": c.get("cuisine") or "",
                 "why": "callable and clears the group's vetoes" if c.get("phone")

@@ -323,9 +323,18 @@ def _row_from_element(element: dict) -> dict | None:
         return None  # a place we cannot locate is a place we cannot recommend
 
     phone = normalise_phone(tags.get("phone") or tags.get("contact:phone") or tags.get("phone:HK"))
+    # A website is worth keeping even when we have a phone number: when the
+    # agent cannot get through, or the venue only takes online bookings, a real
+    # link is a far more honest answer than a shrug. Phone is still preferred --
+    # in Hong Kong, phoning to book IS the norm.
+    website = (tags.get("website") or tags.get("contact:website")
+               or tags.get("url") or tags.get("brand:website") or "").strip()
+    if website and not website.startswith(("http://", "https://")):
+        website = "https://" + website
     return {
         "name": name,
         "phone": phone,
+        "website": website[:300] or None,
         "area": _district_for(lat, lon),
         "cuisine": _cuisine_for(tags),
         "lat": lat, "lon": lon,

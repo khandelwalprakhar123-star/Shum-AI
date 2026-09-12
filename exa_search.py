@@ -208,6 +208,11 @@ def merge(osm_rows: list[dict], exa_rows: list[dict]) -> list[dict]:
             held = next((v for k, v in index.items() if len(key) > 4 and (key in k or k in key)), None)
 
         if held is not None:
+            # Exa found a page for a place OSM already knows. The URL is useful
+            # (it may be the booking page) but it is NOT a phone number and is
+            # never treated as one.
+            if not held.get("website") and row.get("url"):
+                held["website"] = row["url"]
             if not held.get("cuisine") and row.get("cuisine"):
                 held["cuisine"] = row["cuisine"]
             if not held.get("area") and row.get("area"):
@@ -218,6 +223,7 @@ def merge(osm_rows: list[dict], exa_rows: list[dict]) -> list[dict]:
         else:
             fresh = dict(row)
             fresh["phone"] = None
+            fresh.setdefault("website", row.get("url") or None)
             merged.append(fresh)
             index[key] = fresh
 

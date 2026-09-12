@@ -39,6 +39,7 @@ ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
 
 import exa_search
+import people
 import places
 import pipeline
 from envlite import env, env_flag, env_list, load_env, warn_if_tls_broken
@@ -136,6 +137,7 @@ class ChatState:
 
 
 STATE: dict[int, ChatState] = {}
+PEOPLE: dict = {}          # chat_id -> name -> remembered profile
 
 
 def state_for(chat_id: int) -> ChatState:
@@ -272,9 +274,28 @@ def handle_decide(tg: Telegram, chat_id: int, state: ChatState) -> None:
     try:
         tg.send(chat_id, f"Reading the last <b>{len(state.history)}</b> lines…")
 
-        constraints = pipeline.extract_constraints(state.as_text())
+        # Hand the extractor what it already knows about these people, so a
+        # constraint Priya stated in July does not need restating today.
+        known = people.prior_knowledge(PEOPLE, chat_id)
+        constraints = pipeline.extract_constraints(state.as_text(), known=known)
         state.constraints = constraints
-        tg.send(chat_id, pipeline.render_constraints(constraints))
+
+        rendered = pipeline.render_constraints(constraints)
+        if known:
+            seen, remembered = people.stats(PEOPLE, chat_id)
+            rendered += (f"\n<i>{remembered} thing(s) already remembered about "
+                         f"{seen} people were taken into account.</i>")
+        tg.send(chat_id, rendered)
+
+        # Learn from this pass. Only quoted constraints are kept, so one bad
+        # inference cannot become a permanent invisible bias.
+        newly = people.learn(PEOPLE, chat_id, constraints)
+        people.save(PEOPLE)
+        if newly:
+            tg.send(chat_id,
+                    "<b>Noted for next time</b>\n"
+                    + "\n".join(f"\u2022 {item}" for item in newly[:6])
+                    + "\n\n<i>/who to see everything I remember, /forget NAME to drop it.</i>")
 
         # The search follows the chat. areas_for() turns the districts people
         # actually named into bounding boxes; relevance_rank() then re-ranks
@@ -417,7 +438,15 @@ def handle_close(tg: Telegram, chat_id: int, state: ChatState) -> None:
     hard_list = [h["constraint"] for h in state.constraints.get("hard", []) if h.get("constraint")]
 
     if refusal:
-        tg.send(chat_id, f"\U0001f3c6 <b>{winner['name']}</b> wins.\n{tally}\n\n{refusal}")
+        # Refusing to dial is not the same as having nothing to offer. If the
+        # venue publishes a booking page, hand that over -- the honest fallback
+        # the whole industry actually uses is link handoff.
+        extra = ""
+        if winner.get("website"):
+            extra = (f"\n\n\U0001f517 They do have a booking page though:\n"
+                     f"{winner['website']}\n\n"
+                     "<i>Someone will have to book it there by hand.</i>")
+        tg.send(chat_id, f"\U0001f3c6 <b>{winner['name']}</b> wins.\n<i>{tally}</i>\n\n{refusal}{extra}")
         return
 
     token = uuid.uuid4().hex[:12]
@@ -437,6 +466,7 @@ def handle_close(tg: Telegram, chat_id: int, state: ChatState) -> None:
         "callback_number": env("CALLBACK_NUMBER"),
         "constraints": hard_list,
         "notes": winner.get("why", ""),
+        "website": winner.get("website"),
         "area": winner.get("area", ""),
         "vote_tally": tally,
         "dial": False,
@@ -590,6 +620,15 @@ def handle_message(tg: Telegram, message: dict) -> None:
         handle_decide(tg, chat_id, state)
     elif verb == "close":
         handle_close(tg, chat_id, state)
+    elif verb == "who":
+        tg.send(chat_id, people.render(PEOPLE, chat_id))
+    elif verb == "forget":
+        target = text.split(maxsplit=1)[1].strip() if len(text.split()) > 1 else ""
+        if target.lower() in ("all", "everyone", "everything"):
+            target = ""
+        message = people.forget(PEOPLE, chat_id, target)
+        people.save(PEOPLE)
+        tg.send(chat_id, message)
     elif verb == "status":
         constraint_count = len(state.constraints.get("hard", [])) + len(state.constraints.get("vetoed", []))
         tg.send(
@@ -669,6 +708,12 @@ def main() -> None:
     else:
         allow = env_list("CONSENTED_NUMBERS")
         print(f"[bot] live calling enabled; consent allowlist has {len(allow)} number(s)")
+
+    global PEOPLE
+    PEOPLE = people.load()
+    if PEOPLE:
+        total_people = sum(len(chat) for chat in PEOPLE.values())
+        print(f"[bot] remembers {total_people} people across {len(PEOPLE)} chat(s)")
 
     restored = load_state()
     if restored:

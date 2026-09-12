@@ -15,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bot
+import people
 from harness import Suite
 
 TMP_PENDING = Path(__file__).resolve().parent / "_test_pending.json"
@@ -57,10 +58,11 @@ def msg(text, chat_id=-100, name="Marcus", update_id=1):
 
 
 SUITE_STATE = Path(__file__).resolve().parent / "_test_suite_state.json"
+SUITE_PEOPLE = Path(__file__).resolve().parent / "_test_suite_people.json"
 
 
 def run() -> Suite:
-    s = Suite("bot", expect_at_least=66)
+    s = Suite("bot", expect_at_least=70)
     bot.PENDING_PATH = TMP_PENDING
     # Redirect persistence for the entire suite. Without this, every handler
     # under test wrote into the project's real chat_state.json and the next
@@ -76,6 +78,13 @@ def run() -> Suite:
          real_state_path.stat().st_size if real_state_path.exists() else 0)
     )
     bot.STATE_PATH = SUITE_STATE
+    real_people_path = people.PEOPLE_PATH
+    real_people_before = (
+        (real_people_path.exists(),
+         real_people_path.stat().st_mtime_ns if real_people_path.exists() else 0)
+    )
+    people.PEOPLE_PATH = SUITE_PEOPLE
+    bot.PEOPLE = {}
     for key in ("DEMO_PHONE", "CONSENTED_NUMBERS", "ALLOW_ANY_NUMBER"):
         os.environ.pop(key, None)
     os.environ["BOOKER_NAME"] = "Prakhar"
@@ -206,7 +215,7 @@ def run() -> Suite:
     import places as pls
     import exa_search as ex
     saved = (pl.extract_constraints, pl.propose, pls.search_places, ex.search)
-    pl.extract_constraints = lambda text: {"party_size": 6, "when_text": "Friday 8pm",
+    pl.extract_constraints = lambda text, known="": {"party_size": 6, "when_text": "Friday 8pm",
                                            "hard": [], "soft": [], "vetoed": [], "coming_from": [],
                                            "prefer_cuisines": [], "avoid_cuisines": [],
                                            "open_questions": [], "source": "stub", "summary_line": "s"}
@@ -269,7 +278,7 @@ def run() -> Suite:
     import exa_search as ex2
     saved2 = (pl2.extract_constraints, pl2.propose, pls2.search_places, ex2.search)
     seen_areas: list = []
-    pl2.extract_constraints = lambda text: {
+    pl2.extract_constraints = lambda text, known="": {
         "party_size": 6, "when_text": "Friday 8pm", "hard": [], "soft": [], "vetoed": [],
         "coming_from": [{"who": "Dan", "place": "Sha Tin"}], "prefer_cuisines": [],
         "avoid_cuisines": [], "open_questions": [], "source": "stub", "summary_line": "s"}
@@ -384,6 +393,32 @@ def run() -> Suite:
     s.eq("cancelling clears the pending call", json.loads(TMP_PENDING.read_text())["status"], "cancelled")
     s.contains("and says nothing was dialled", tg.sent_text(), "Nothing was dialled")
 
+    # --- a booking link is a real answer, not a shrug ---------------------
+    os.environ["CONSENTED_NUMBERS"] = "+85228519969"
+    os.environ.pop("DEMO_PHONE", None)
+    st = seeded_state(None)
+    st.picks = [{"name": "Link Only", "phone": None, "website": "https://example.com/book",
+                 "area": "Central", "why": "x"}]
+    st.poll_options = ["Link Only", bot.NONE_OPTION]
+    st.constraints = {"party_size": 6, "when_text": "Friday 8pm", "hard": []}
+    tg = FakeTelegram({"stopPoll": {"options": [{"voter_count": 3}, {"voter_count": 0}]}})
+    bot.handle_close(tg, -100, st)
+    s.contains("an uncallable winner still yields its booking page",
+               tg.sent_text(), "https://example.com/book")
+    s.contains("and says a human has to finish it", tg.sent_text(), "by hand")
+    s.check("but no call is queued", not any(
+        "inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg.calls))
+
+    st = seeded_state(None)
+    st.picks = [{"name": "Nothing", "phone": None, "website": None, "area": "", "why": "x"}]
+    st.poll_options = ["Nothing", bot.NONE_OPTION]
+    st.constraints = {"party_size": 6, "when_text": "Friday 8pm", "hard": []}
+    tg = FakeTelegram({"stopPoll": {"options": [{"voter_count": 3}, {"voter_count": 0}]}})
+    bot.handle_close(tg, -100, st)
+    s.contains("with neither number nor link it says so plainly",
+               tg.sent_text(), "phone number")
+    s.check("and invents no link", "http" not in tg.sent_text())
+
     # --- history survives a restart ---------------------------------------
     # Found live and it is the worst possible bug for this project: history was
     # in memory only, so a restart turned a 40-line conversation into 2 --
@@ -461,6 +496,10 @@ def run() -> Suite:
         TMP_PENDING.unlink()
     if SUITE_STATE.exists():
         SUITE_STATE.unlink()
+    if SUITE_PEOPLE.exists():
+        SUITE_PEOPLE.unlink()
+    people.PEOPLE_PATH = real_people_path
+    bot.PEOPLE = {}
     bot.STATE_PATH = real_state_path
     bot.STATE.clear()
     for key in ("DEMO_PHONE", "CONSENTED_NUMBERS", "ALLOW_ANY_NUMBER"):
@@ -475,5 +514,11 @@ def run() -> Suite:
     )
     s.eq("the suite did not create or modify the real chat_state.json",
          real_state_after, real_state_before)
+    real_people_after = (
+        (real_people_path.exists(),
+         real_people_path.stat().st_mtime_ns if real_people_path.exists() else 0)
+    )
+    s.eq("the suite did not create or modify the real people.json",
+         real_people_after, real_people_before)
     s.check("the suite's own temp state file is cleaned up", not SUITE_STATE.exists())
     return s
