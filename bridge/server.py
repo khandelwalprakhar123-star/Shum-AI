@@ -433,8 +433,22 @@ class Handler(BaseHTTPRequestHandler):
             live_id = send_telegram_returning_id(
                 pending.get("chat_id"), render_live(pending, [])
             )
+
+            # Auto-dial is opt-in, and the reason is a real trade-off rather
+            # than caution for its own sake. Brief section 9.2 asks for TWO
+            # humans: one pressing approve, one dialling. With AUTO_DIAL=1
+            # there is one -- the person who approved in the chat. That is
+            # still a human authorising this specific call to a number already
+            # on the consent allowlist, which is why it is offered at all; but
+            # it is one gate, not two, so it is never on unless asked for.
+            dialled, how = (False, "AUTO_DIAL not set - dial it yourself")
+            if env_flag("AUTO_DIAL"):
+                dialled, how = dial_phone(pending.get("dial_number") or "")
+            print(f"[bridge] {how}")
+
             self._json(patch_pending(
-                dial=True, status="dialing", live_message_id=live_id, live_turns=[]
+                dial=True, status="dialing", live_message_id=live_id,
+                live_turns=[], auto_dialled=dialled,
             ))
 
         elif route == "/turn":
@@ -558,6 +572,41 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("[bridge] %s\n" % (fmt % args))
 
 
+def dial_phone(number: str) -> tuple[bool, str]:
+    """Ring the operator's own phone, automatically, for free.
+
+    macOS hands a tel: URL to FaceTime, which places the call through a paired
+    iPhone on the same Apple ID (Continuity / "Calls from iPhone"). The call
+    therefore goes out over the operator's real +852 cellular line -- which is
+    the entire reason a Hong Kong restaurant picks up -- at no cost, with no
+    telephony provider, no purchased number and no regulatory bundle.
+
+    Crucially this changes nothing about the transcript. The agent still lives
+    in the call page over WebRTC and still hears through the laptop microphone;
+    all this removes is a human tapping digits.
+
+    Requires, and silently does nothing without: an iPhone signed into the same
+    Apple ID with "Calls from iPhone" enabled in FaceTime. Verified present on
+    the build machine (FaceTime.app plus a paired iPhone), but a laptop without
+    those is a normal state, not an error -- the number is on screen and on the
+    approval card either way.
+
+    OFF BY DEFAULT. See the note in /dial about what this does to the second
+    human in brief section 9.2.
+    """
+    if sys.platform != "darwin":
+        return False, f"auto-dial is macOS-only (this is {sys.platform})"
+    digits = "".join(ch for ch in (number or "") if ch.isdigit() or ch == "+")
+    if not digits:
+        return False, "no number to dial"
+    try:
+        subprocess.Popen(["open", f"tel://{digits}"],
+                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True, f"handed tel://{digits[:-4]}**** to FaceTime"
+    except (OSError, FileNotFoundError) as exc:
+        return False, f"could not hand off the call: {exc}"
+
+
 def open_call_page() -> None:
     """Open the call desk in the default browser when the bridge starts.
 
@@ -592,6 +641,8 @@ def main() -> None:
         print("[bridge] WARNING: ELEVENLABS_AGENT_ID is empty — the call page will refuse to start.")
     print(f"[bridge] listening on http://localhost:{PORT}")
     threading.Timer(1.0, open_call_page).start()   # after the socket is up
+    if env_flag("AUTO_DIAL"):
+        print("[bridge] AUTO_DIAL on - approving in the chat will ring the phone itself")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 
 

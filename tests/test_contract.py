@@ -55,7 +55,7 @@ def fields_page_reads() -> set[str]:
 
 
 def run() -> Suite:
-    s = Suite("contract", expect_at_least=58)
+    s = Suite("contract", expect_at_least=66)
 
     written = fields_bot_writes()
     read = fields_page_reads()
@@ -208,6 +208,22 @@ def run() -> Suite:
     # approval, and a human still dials.
     s.check("auto-arming does not auto-start the agent",
             "state.armed && !state.running" in PAGE_SRC)
+
+    # --- auto-dial --------------------------------------------------------
+    s.check("auto-dial exists", "def dial_phone" in SERVER_SRC)
+    s.check("it is OFF unless explicitly asked for", 'env_flag("AUTO_DIAL")' in SERVER_SRC)
+    s.check("it never becomes the default", "AUTO_DIAL=0" in
+            (ROOT / ".env.example").read_text(encoding="utf-8"))
+    s.check("it degrades on non-macOS instead of raising",
+            'sys.platform != "darwin"' in SERVER_SRC)
+    s.check("a failed hand-off cannot take the bridge down",
+            "could not hand off the call" in SERVER_SRC)
+    s.check("the dialled number is masked in the log, which is on screen "
+            "during the demo", 'digits[:-4]' in SERVER_SRC)
+    s.check("it dials only what the approval gate resolved, never raw input",
+            'dial_phone(pending.get("dial_number")' in SERVER_SRC)
+    s.check("the trade-off against brief 9.2 is written down where it is made",
+            "one gate, not two" in SERVER_SRC)
 
     # --- booking links ----------------------------------------------------
     places_src = (ROOT / "places.py").read_text(encoding="utf-8")
