@@ -33,7 +33,7 @@ GOOD = {
 
 
 def run() -> Suite:
-    s = Suite("pipeline", expect_at_least=58)
+    s = Suite("pipeline", expect_at_least=70)
     os.environ["GEMINI_API_KEY"] = "AQ.test-key-not-real"
     os.environ.pop("OPENROUTER_API_KEY", None)
 
@@ -297,6 +297,73 @@ def run() -> Suite:
     s.contains("'prefers somewhere quiet' loses only the verb", softs, "somewhere quiet")
     s.eq("a hard constraint is NOT reworded", tidy["hard"][0]["constraint"], "Does not eat pork")
     s.eq("whitespace is collapsed", pipeline._tidy_constraint("wants   big   table", "soft"), "big table")
+
+    # --- poll ordering ----------------------------------------------------
+    # Observed live: the model returned three picks, the FIRST of which openly
+    # declared fails=["vegetarian"] while the other two satisfied everything --
+    # and the group voted for the first one 2-0 because it was at the top. A
+    # poll is read top-down, so its order is part of the recommendation.
+    live_constraints = {
+        "hard": [{"constraint": "No pork"}, {"constraint": "No beef"},
+                 {"constraint": "vegetarian"}],
+        "vetoed": [{"thing": "hotpot"}],
+    }
+    live_picks = [
+        {"name": "Coffee Shop", "phone": "+85221111111",
+         "satisfies": ["No pork", "No beef"], "fails": ["vegetarian"]},
+        {"name": "Man Mo Dim Sum", "phone": "+85222222222",
+         "satisfies": ["No pork", "No beef", "vegetarian"], "fails": []},
+        {"name": "La Creperie", "phone": "+85223333333",
+         "satisfies": ["No pork", "No beef", "vegetarian"], "fails": []},
+    ]
+    ordered = pipeline._order_picks(live_picks, live_constraints)
+    s.eq("a pick that fails a hard constraint sinks to last",
+         ordered[-1]["name"], "Coffee Shop")
+    s.check("the viable options come first",
+            {ordered[0]["name"], ordered[1]["name"]} == {"Man Mo Dim Sum", "La Creperie"})
+    s.eq("no pick is dropped - three imperfect options beat two and a gap",
+         len(ordered), 3)
+
+    s.eq("a pick failing a VETO also sinks",
+         pipeline._order_picks([
+             {"name": "Hotpot Place", "phone": "+85221111111", "satisfies": [], "fails": ["hotpot"]},
+             {"name": "Fine", "phone": "+85222222222", "satisfies": ["No pork"], "fails": []},
+         ], live_constraints)[-1]["name"], "Hotpot Place")
+
+    s.eq("failing something NOT stated as hard does not sink a pick",
+         pipeline._order_picks([
+             {"name": "Nearly", "phone": "+85221111111", "satisfies": ["No pork"], "fails": ["outdoor seating"]},
+             {"name": "NoPhone", "phone": None, "satisfies": [], "fails": []},
+         ], live_constraints)[0]["name"], "Nearly")
+
+    s.eq("at equal quality, callable wins",
+         pipeline._order_picks([
+             {"name": "Uncallable", "phone": None, "satisfies": ["No pork"], "fails": []},
+             {"name": "Callable", "phone": "+85221111111", "satisfies": ["No pork"], "fails": []},
+         ], live_constraints)[0]["name"], "Callable")
+
+    s.eq("ordering an empty list is safe", pipeline._order_picks([], live_constraints), [])
+    s.eq("ordering with no constraints is safe",
+         len(pipeline._order_picks(live_picks, {})), 3)
+
+    # propose() must apply the ordering, not just expose the helper.
+    with FakeNet([gemini_ok({"picks": [
+            {"name": "Coffee Shop", "why": "x", "satisfies": ["No pork"], "fails": ["vegetarian"]},
+            {"name": "Man Mo Dim Sum", "why": "y", "satisfies": ["No pork", "vegetarian"], "fails": []},
+        ], "tradeoff_line": ""})]):
+        result = pipeline.propose(live_constraints, [
+            {"name": "Coffee Shop", "phone": "+85221111111", "area": "Central", "cuisine": "cafe"},
+            {"name": "Man Mo Dim Sum", "phone": "+85222222222", "area": "Sheung Wan", "cuisine": "dim sum"},
+        ])
+    s.eq("propose() puts the viable pick first", result["picks"][0]["name"], "Man Mo Dim Sum")
+
+    # The root cause: a stated diet was filed as a soft preference, which is
+    # what let a pick that fails it through at all.
+    s.check("the prompt states a diet is ALWAYS hard, never soft",
+            "ALWAYS hard" in pipeline.EXTRACT_PROMPT)
+    s.contains("and gives the exact phrasings that fooled it",
+               pipeline.EXTRACT_PROMPT, "im vegetarian")
+    s.contains("and says what SOFT is actually for", pipeline.EXTRACT_PROMPT, "genuine wants")
 
     # --- render_constraints shows its evidence ---------------------------
     rendered = pipeline.render_constraints(GOOD)

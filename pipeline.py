@@ -324,6 +324,12 @@ Rules:
 - Only record what someone actually said. Never infer a dietary rule from an ethnicity, a name, or a guess.
 - Every constraint must carry the quote it came from. If you cannot quote it, do not record it.
 - Distinguish HARD (someone cannot or will not) from SOFT (someone would prefer).
+- A stated diet, allergy or religious restriction is ALWAYS hard, never soft, even when
+  said casually and in passing. "im vegetarian", "i'm vegan", "I don't eat pork",
+  "halal only", "no shellfish, allergic" are all HARD. Someone saying what they ARE is
+  not expressing a preference. Getting this wrong lets a venue that cannot feed them
+  reach the poll.
+- SOFT is only for genuine wants: a cuisine someone fancies, a vibe, a price hope.
 - A dish rejected two or more separate times is a veto, even if nobody used the word.
 - "coming from X" is a travel constraint, not a location preference. Record the origin, not a district to search.
 - If the group never said how many people or when, leave those null. Do not invent them.
@@ -663,7 +669,7 @@ def propose(constraints: dict, candidates: list[dict]) -> dict:
 
     try:
         parsed, provider = _generate(prompt)
-        picks = _rehydrate(parsed.get("picks"), candidates)
+        picks = _order_picks(_rehydrate(parsed.get("picks"), candidates), constraints)
         if picks:
             return {
                 "picks": picks[:3],
@@ -713,6 +719,51 @@ def _rehydrate(model_picks, candidates: list[dict]) -> list[dict]:
             "source": match.get("source") or "osm",
         })
     return out
+
+
+def _order_picks(picks: list[dict], constraints: dict) -> list[dict]:
+    """Put the options that actually work at the top of the poll.
+
+    This is a product decision, not cosmetics. Observed live: the model
+    returned three picks, the FIRST of which openly declared
+    fails=["vegetarian"] while the other two satisfied everything -- and the
+    group voted for the first one 2-0, because it was at the top. A poll is
+    read top-down, so ordering it is part of the recommendation.
+
+    Ranked by: nothing HARD failed, then callable, then nothing failed at all,
+    then how much it satisfies.
+
+    Callable sits ABOVE "fails nothing" deliberately. The entire product is
+    that it can telephone the place, so a venue that misses a soft preference
+    but can actually be booked beats a flawless one nobody can reach. Only a
+    HARD failure outranks that.
+
+    A pick that fails a hard constraint can still appear, because three
+    imperfect options beat two options and a gap -- but it appears last, and
+    the message already prints its ✗ line.
+    """
+    hard_keys = {_norm(h.get("constraint", "")) for h in (constraints.get("hard") or [])}
+    hard_keys |= {_norm(v.get("thing", "")) for v in (constraints.get("vetoed") or [])}
+    hard_keys.discard("")
+
+    def breaks_hard(pick: dict) -> int:
+        count = 0
+        for failure in pick.get("fails") or []:
+            key = _norm(str(failure))
+            if key and any(key in h or h in key for h in hard_keys):
+                count += 1
+        return count
+
+    def rank(pick: dict) -> tuple:
+        fails = pick.get("fails") or []
+        return (
+            -breaks_hard(pick),          # fails a hard constraint -> sink it
+            1 if pick.get("phone") else 0,   # callable outranks merely perfect
+            0 if fails else 1,           # then: fails nothing at all
+            len(pick.get("satisfies") or []),
+        )
+
+    return sorted(picks, key=rank, reverse=True)
 
 
 def heuristic_picks(constraints: dict, candidates: list[dict]) -> dict:
