@@ -290,23 +290,6 @@ def format_outcome(pending: dict, body: dict) -> str:
     if collected.get("staff_notes"):
         lines.append(f"Note: {esc(collected['staff_notes'])}")
 
-    turns = body.get("transcript") or []
-    if turns:
-        lines.append("\n<b>Transcript</b>")
-        for turn in turns[-14:]:
-            who = "\U0001f916" if turn.get("source") in ("ai", "agent") else "\U0001f3ea"
-            said = str(turn.get("message", "")).strip()
-            if said:
-                lines.append(f"{who} {esc(said)}")
-
-    source = body.get("outcome_source")
-    if source == "transcript (derived)":
-        # Say where the structured fields came from. The agent's own schema saw
-        # the audio; this read only the words. That difference matters if
-        # somebody is about to turn up at a restaurant on the strength of it.
-        lines.append("\n<i>Fields above were read back off the transcript, not confirmed "
-                     "by the agent's own call analysis \u2014 worth a glance before you rely on them.</i>")
-
     if status in ("confirmed", "booked"):
         # One link, everybody's own calendar. Telegram does not hand out member
         # email addresses -- correctly -- so there is nobody to send an invite
@@ -317,10 +300,25 @@ def format_outcome(pending: dict, body: dict) -> str:
             lines.append(f"\n\U0001f4c5 <a href=\"{esc(link)}\">Add to your calendar</a>"
                          " \u2014 everyone tap it once.")
         else:
-            # No clock time means no calendar entry. A dinner filed at a guessed
-            # hour is wrong in six pockets and nobody notices until they are late.
-            lines.append("\n<i>No calendar link: the exact time never got pinned down "
-                         "on the call, and a guessed one would be worse than none.</i>")
+            # No hour at all means no calendar entry. A dinner filed at a
+            # guessed hour is wrong in six pockets and nobody notices until
+            # they are late. A bare time like "8pm" is NOT that case and does
+            # get a link -- see invite.event_time.
+            lines.append("\n<i>No calendar link: no exact hour was ever said, "
+                         "and a guessed one would be worse than none.</i>")
+
+    # NO transcript here. The live message directly above this one was edited
+    # turn by turn as the call happened and already holds the whole
+    # conversation -- printing it again produced two identical walls of text in
+    # a row, and buried the one thing this message exists for: what was
+    # actually booked, and the link that puts it in everyone's calendar.
+    source = body.get("outcome_source")
+    if source == "transcript (derived)":
+        # Say where the structured fields came from. The agent's own schema saw
+        # the audio; this read only the words. That difference matters if
+        # somebody is about to turn up at a restaurant on the strength of it.
+        lines.append("\n<i>Fields above were read back off the transcript, not confirmed "
+                     "by the agent's own call analysis \u2014 worth a glance before you rely on them.</i>")
 
     if pending.get("demo_override"):
         lines.append(
@@ -450,21 +448,30 @@ class Handler(BaseHTTPRequestHandler):
                 pending.get("chat_id"), render_live(pending, [])
             )
 
-            # Auto-dial is opt-in, and the reason is a real trade-off rather
-            # than caution for its own sake. Brief section 9.2 asks for TWO
-            # humans: one pressing approve, one dialling. With AUTO_DIAL=1
-            # there is one -- the person who approved in the chat. That is
-            # still a human authorising this specific call to a number already
-            # on the consent allowlist, which is why it is offered at all; but
-            # it is one gate, not two, so it is never on unless asked for.
-            dialled, how = (False, "AUTO_DIAL not set - dial it yourself")
-            if env_flag("AUTO_DIAL"):
-                dialled, how = dial_phone(pending.get("dial_number") or "")
-            print(f"[bridge] {how}")
+            # A human dials. There is no automatic path here, and the attempt
+            # to build one is worth recording because it failed for a reason
+            # that is structural rather than fixable.
+            #
+            # macOS can hand a tel: URL to FaceTime, which relays through a
+            # paired iPhone -- so the Mac becomes the call's audio endpoint,
+            # using its own microphone and speakers. But the agent also lives
+            # on that Mac, in a browser tab, and the two are joined only by
+            # air. Put both ends on one machine and each one's echo
+            # cancellation removes exactly the signal the other needs: the
+            # agent's voice is cancelled out of the call's microphone, and the
+            # restaurant's voice is cancelled out of the browser's. Measured,
+            # 12 Sep: the phone rang, was answered, and both sides heard
+            # silence. Acoustic coupling needs two devices with air between
+            # them, which means the dialling device cannot be the laptop.
+            #
+            # So brief section 9.2's two humans -- one approving, one dialling
+            # -- is not a compromise here. It is the only topology where the
+            # audio works at all.
+            print("[bridge] approved - dial the number by hand and put it on speakerphone")
 
             self._json(patch_pending(
                 dial=True, status="dialing", live_message_id=live_id,
-                live_turns=[], auto_dialled=dialled,
+                live_turns=[],
             ))
 
         elif route == "/turn":
@@ -588,107 +595,6 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("[bridge] %s\n" % (fmt % args))
 
 
-def _telephony_running() -> bool:
-    """Is an app that owns the tel: scheme up right now?
-
-    On macOS 26 there is no Phone.app -- FaceTime.app claims tel:, telephony:
-    and facetime-audio: (verified with lsregister on the build machine). Older
-    macOS shipped a separate Phone.app, so both are checked.
-    """
-    for app in ("FaceTime", "Phone"):
-        try:
-            if subprocess.run(["pgrep", "-x", app], capture_output=True).returncode == 0:
-                return True
-        except (OSError, FileNotFoundError):
-            return False
-    return False
-
-
-def dial_phone(number: str) -> tuple[bool, str]:
-    """Ring the operator's own phone, automatically, for free.
-
-    macOS hands a `tel:` URL to whichever app owns telephony. On macOS 26 that
-    is FaceTime.app, which places the call through a paired iPhone over
-    Continuity -- so the call goes out on the operator's real +852 cellular
-    line: no telephony provider, no purchased number, no regulatory bundle, no
-    cost, and the local caller ID that is the entire reason a Hong Kong
-    restaurant picks up.
-
-    This changes nothing about the transcript. The agent still runs in the call
-    page over WebRTC and still hears through the laptop microphone. All it
-    removes is a human tapping digits.
-
-    NOT `facetime-audio:`. Measured, 12 Sep 14:52: that URL exits 0, spins up
-    the FaceTime notification services, opens no window, writes no call-history
-    row, and rings nothing -- because FaceTime Audio can only reach a number
-    registered with FaceTime, and a restaurant's landline never is. It also
-    would not carry a +852 caller ID if it did connect. It is a dead end that
-    looks like it worked, which is the worst kind.
-
-    THREE BUGS LIVED HERE, all of which reported success:
-
-    1. The URL was "tel://<number>". That is not the tel: scheme -- tel takes no
-       authority component -- and nothing on the system claims it. Measured:
-       "tel://" launched no handler at all, while "tel:" launched the handler
-       in 1.2 seconds.
-    2. Success was the return value of subprocess.Popen, which only says a
-       process was spawned. `open` exits 0 whether or not any application
-       handles the URL, so a dial that went nowhere reported "dialled: True".
-    3. The check was "is a telephony app running?" -- but FaceTime STAYS OPEN
-       after a call, so on the second dial onwards the check passed instantly
-       without the handoff having landed at all. Caught live: FaceTime was
-       already up, and the function would have confirmed a dial it had no
-       evidence for. A test that cannot fail is not a test.
-
-    So the process state is now sampled BEFORE the handoff, and a launch only
-    counts as evidence if the app was not already there. When it was already
-    running this function says it cannot verify, rather than inventing a
-    confirmation. Whether the call then connects depends on "Calls on Other
-    Devices" and the iPhone being nearby -- which this process cannot see, and
-    does not pretend to.
-    """
-    if sys.platform != "darwin":
-        return False, f"auto-dial is macOS-only (this is {sys.platform})"
-
-    digits = "".join(ch for ch in (number or "") if ch.isdigit() or ch == "+")
-    if not digits:
-        return False, "no number to dial"
-    masked = digits[:-4] + "****" if len(digits) > 4 else "****"
-
-    # Sample BEFORE the handoff. Without this, an already-open FaceTime makes
-    # every dial look successful.
-    was_running = _telephony_running()
-
-    try:
-        # tel:, not tel:// and not facetime-audio: -- see above.
-        subprocess.Popen(["open", f"tel:{digits}"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    except (OSError, FileNotFoundError) as exc:
-        return False, f"could not hand off the call: {exc}"
-
-    if was_running:
-        # Honest answer: the handoff was made, and the one piece of evidence
-        # available here was already true before we started.
-        return True, (f"handed {masked} to FaceTime, which was already open - "
-                      "so this cannot be verified from here. Watch the phone.")
-
-    for _ in range(8):
-        time.sleep(0.4)
-        if _telephony_running():
-            # Deliberately NOT "dialling". FaceTime coming up proves the handoff
-            # landed, not that a call was placed: on a Mac whose iPhone has
-            # "Calls on Other Devices" switched off, it opens and then says
-            # "iPhone Calls Not Available - your iPhone is not configured".
-            # Observed on the build machine. This process cannot see that
-            # banner, so it does not claim more than it knows.
-            return True, (f"handed {masked} to FaceTime - watch the phone. "
-                          "If nothing rings, iPhone > Settings > Cellular > "
-                          "Calls on Other Devices needs to be on for this Mac.")
-
-    return False, (f"handed {masked} to the system but no telephony app came up. "
-                   "Dial by hand; the number is on the approval card.")
-
-
 def open_call_page() -> None:
     """Open the call desk in the default browser when the bridge starts.
 
@@ -723,8 +629,6 @@ def main() -> None:
         print("[bridge] WARNING: ELEVENLABS_AGENT_ID is empty — the call page will refuse to start.")
     print(f"[bridge] listening on http://localhost:{PORT}")
     threading.Timer(1.0, open_call_page).start()   # after the socket is up
-    if env_flag("AUTO_DIAL"):
-        print("[bridge] AUTO_DIAL on - approving in the chat will ring the phone itself")
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 
 

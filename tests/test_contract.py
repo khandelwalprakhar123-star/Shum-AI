@@ -55,7 +55,7 @@ def fields_page_reads() -> set[str]:
 
 
 def run() -> Suite:
-    s = Suite("contract", expect_at_least=95)
+    s = Suite("contract", expect_at_least=96)
 
     written = fields_bot_writes()
     read = fields_page_reads()
@@ -209,135 +209,104 @@ def run() -> Suite:
     s.check("auto-arming does not auto-start the agent",
             "state.armed && !state.running" in PAGE_SRC)
 
-    # --- auto-dial --------------------------------------------------------
-    s.check("auto-dial exists", "def dial_phone" in SERVER_SRC)
-    s.check("it is OFF unless explicitly asked for", 'env_flag("AUTO_DIAL")' in SERVER_SRC)
-    s.check("it never becomes the default", "AUTO_DIAL=0" in
-            (ROOT / ".env.example").read_text(encoding="utf-8"))
-    s.check("it degrades on non-macOS instead of raising",
-            'sys.platform != "darwin"' in SERVER_SRC)
-    s.check("a failed hand-off cannot take the bridge down",
-            "could not hand off the call" in SERVER_SRC)
-    s.check("the dialled number is masked in the log, which is on screen "
-            "during the demo", 'digits[:-4]' in SERVER_SRC)
-    # tel:// is not the tel: scheme -- it takes no authority component -- and
-    # measurably launched nothing, while tel: launched Phone.app in 1.2s.
-    s.check("it uses tel:, not tel://", 'f"tel:{digits}"' in SERVER_SRC
-            and 'tel://{' not in SERVER_SRC)
-    # `open` exits 0 whether or not anything handles the URL, so a spawn is not
-    # a dial. This reported "dialled: True" for a call that went nowhere.
-    s.check("success means a telephony app came up, not that a process spawned",
-            "pgrep" in SERVER_SRC)
-    # Phone.app opening is not a call either: with "Calls on Other Devices"
-    # off it opens and says "iPhone Calls Not Available". Observed. So the
-    # message must not claim the phone is ringing.
-    s.check("it does not claim to be dialling, only to have handed off",
-            "watch the phone" in SERVER_SRC and "dialling {masked}" not in SERVER_SRC)
-    s.check("and it names the exact setting that makes it ring",
-            "Calls on Other Devices" in SERVER_SRC)
-    s.check("it dials only what the approval gate resolved, never raw input",
-            'dial_phone(pending.get("dial_number")' in SERVER_SRC)
-    s.check("the trade-off against brief 9.2 is written down where it is made",
-            "one gate, not two" in SERVER_SRC)
-
-    # tel: is handled by FaceTime.app on macOS 26 -- there is no Phone.app --
-    # so the code must not name an app that does not exist.
-    s.check("it looks for FaceTime, which owns tel: on current macOS",
-            '"FaceTime"' in SERVER_SRC)
-    # facetime-audio: exits 0, opens nothing, logs nothing and rings nothing
-    # unless the callee is FaceTime-registered, which a restaurant never is.
-    s.check("it does NOT use facetime-audio:, which silently reaches nothing",
-            "facetime-audio:{" not in SERVER_SRC
-            and 'f"facetime-audio:' not in SERVER_SRC)
-    s.check("and the dead end is written down so nobody retries it",
-            "facetime-audio" in SERVER_SRC and "rings nothing" in SERVER_SRC)
-    # The bug this test exists for: FaceTime stays open after a call, so
-    # "is it running?" was already true on every dial after the first.
-    s.check("telephony state is sampled BEFORE the hand-off",
-            "was_running = _telephony_running()" in SERVER_SRC)
-    s.check("an already-open FaceTime is reported as unverifiable, not as success",
-            "cannot be verified from here" in SERVER_SRC)
-
-    # --- auto-dial, actually executed -------------------------------------
+    # --- what the agent says out loud --------------------------------------
     #
-    # Everything above reads the source. These run the function, because the
-    # defect that shipped was behavioural: the check passed when it had no
-    # evidence, and no amount of grepping would have caught that.
-    import bridge.server as server  # noqa: PLC0415
+    # The prompt interpolates when_text into a sentence, so "8pm" came out as
+    # "a table for 6 people 8pm" on a real call. The fix adds a preposition
+    # for speech only: the stored when_text keeps the group's own words,
+    # because the booking record and the calendar entry quote them.
+    s.check("the spoken time gets a preposition", "function spokenWhen" in PAGE_SRC)
+    s.check("and it is what the agent is given", "when_text: spokenWhen(" in PAGE_SRC)
+    s.check("a phrase that already reads as a time is left alone",
+            "leads.test(t) ? t :" in PAGE_SRC)
+    s.check("weekday names match with their suffix, so 'friday at 9' is left alone",
+            "[a-z]*" in PAGE_SRC and "does not match" in PAGE_SRC)
+    s.check("the stored when_text is not rewritten",
+            "p.when_text = " not in PAGE_SRC)
 
-    class FakeProc:
-        """Records `open` invocations instead of launching anything."""
+    # --- the result message must not repeat the transcript -----------------
+    #
+    # The live message is edited turn by turn and already holds the whole
+    # conversation. Printing it again in the outcome gave the group two
+    # identical walls of text in a row and buried the booking under them.
+    s.check("the outcome message carries no transcript of its own",
+            "<b>Transcript</b>" not in SERVER_SRC)
+    s.check("...and the live message still does",
+            "def render_live" in SERVER_SRC)
+    s.check("the calendar link sits with the booking facts, above the caveats",
+            SERVER_SRC.index("Add to your calendar") < SERVER_SRC.index("read back off the transcript"))
 
-        def __init__(self, running_before: bool, comes_up: bool):
-            self.calls: list[list[str]] = []
-            self._running = running_before
-            self._comes_up = comes_up
+    # --- a rehearsal must not look like a reservation -----------------------
+    #
+    # With DEMO_PHONE set the call never reached the venue, so there is no
+    # table. A calendar entry saying "Dinner at Mezzo" with the restaurant's
+    # real number, sitting in six people's calendars, is a booking that does
+    # not exist -- and nobody re-reads a calendar entry to check.
+    invite_src = (ROOT / "invite.py").read_text(encoding="utf-8")
+    s.check("a demo booking says so in the calendar entry",
+            "REHEARSAL" in invite_src)
+    s.check("...and in its title", '"[rehearsal] "' in invite_src)
+    s.check("...and does not carry the real venue's number",
+            'not pending.get("demo_override")' in invite_src)
 
-        def popen(self, argv, **_kw):
-            self.calls.append(list(argv))
-            if self._comes_up:
-                self._running = True          # the app launches, as it would
-            return object()
+    # --- the newest turn has to actually be on screen ----------------------
+    #
+    # With scroll-behavior: smooth on the transcript, `scrollTop =
+    # scrollHeight` is an animation, and each arriving turn restarts it.
+    # Measured with turns 120ms apart: the latest line settled 1081px below
+    # the fold and never got there. A call desk whose transcript lags a minute
+    # behind the call is worse than no transcript, because it is believed.
+    s.check("the transcript scrolls instantly, not smoothly",
+            "scroll-behavior: smooth" not in PAGE_SRC)
+    s.check("every new line pins the thread to the bottom",
+            PAGE_SRC.count("thread.scrollTop = thread.scrollHeight") >= 2,
+            "both a spoken turn and a system note have to do it")
+    s.check("and the measurement is recorded so it is not re-added for polish",
+            "1081px" in PAGE_SRC)
 
-        def run(self, argv, **_kw):
-            class R:
-                pass
-            r = R()
-            # pgrep -x <app>: 0 means running.
-            r.returncode = 0 if self._running and argv[-1] == "FaceTime" else 1
-            return r
+    # --- the call page must not narrate a call that is not happening -------
+    #
+    # pending_call.json is patched, never emptied, so a finished call leaves a
+    # populated object behind. The page used to test Object.keys(p).length,
+    # which made every finished call look live: the amber "this dials a real
+    # venue" consent rail sat over a blank strip, and the last number dialled
+    # stayed on screen for someone to dial again. Caught by looking at it.
+    s.check("a live call needs a number, a name, and a status that is not done",
+            "p.status !== \"done\"" in PAGE_SRC and "p.dial_number" in PAGE_SRC)
+    s.check("emptiness is no longer decided by counting keys",
+            "Object.keys(p).length" not in PAGE_SRC)
+    s.check("and the reason is recorded next to the check",
+            "never emptied" in PAGE_SRC)
 
-    def dial_with(running_before: bool, comes_up: bool, number="+85260894121",
-                  platform="darwin"):
-        fake = FakeProc(running_before, comes_up)
-        saved = (server.sys.platform, server.subprocess.Popen,
-                 server.subprocess.run, server.time.sleep)
-        server.sys.platform = platform
-        server.subprocess.Popen = fake.popen
-        server.subprocess.run = fake.run
-        server.time.sleep = lambda _s: None      # no real waiting in a test
-        try:
-            return server.dial_phone(number), fake
-        finally:
-            (server.sys.platform, server.subprocess.Popen,
-             server.subprocess.run, server.time.sleep) = saved
-
-    (ok, why), fake = dial_with(running_before=False, comes_up=True)
-    s.check("a clean launch is a confirmed hand-off", ok is True)
-    s.contains("...and still only claims a hand-off", why, "watch the phone")
-    s.eq("the URL is the tel: scheme", fake.calls[0], ["open", "tel:+85260894121"])
-
-    (ok, why), _ = dial_with(running_before=True, comes_up=True)
-    s.check("an already-open FaceTime still hands off", ok is True)
-    s.contains("...but refuses to call it verified", why, "cannot be verified")
-    s.check("...and does not pretend the phone is ringing",
-            "If nothing rings" not in why)
-
-    (ok, why), fake = dial_with(running_before=False, comes_up=False)
-    s.check("nothing coming up is a FAILURE, not a success", ok is False,
-            "`open` exits 0 even when no application handles the URL")
-    s.contains("...and it says what to do instead", why, "Dial by hand")
-    s.eq("it still tried exactly once", len(fake.calls), 1)
-
-    (ok, why), fake = dial_with(running_before=False, comes_up=True,
-                                platform="linux")
-    s.check("non-macOS degrades instead of raising", ok is False)
-    s.contains("...naming the platform it got", why, "linux")
-    s.eq("and it dials nothing at all", fake.calls, [])
-
-    (ok, why), fake = dial_with(running_before=False, comes_up=True, number="")
-    s.check("an empty number is refused", ok is False)
-    s.eq("...before any hand-off", fake.calls, [])
-
-    (ok, why), _ = dial_with(running_before=False, comes_up=True)
-    s.check("the number is masked in the returned message",
-            "60894121" not in why and "****" in why,
-            "the bridge log is on screen during the demo")
-
-    for bad in ("facetime-audio:", "tel://"):
-        _, fake = dial_with(running_before=False, comes_up=True)
-        s.check(f"it never emits {bad}",
-                not any(bad in part for call in fake.calls for part in call))
+    # --- dialling is a human's job, permanently ---------------------------
+    #
+    # There WAS an auto-dial here: macOS hands a tel: URL to FaceTime, which
+    # relays through a paired iPhone. It worked -- the phone rang. It was
+    # removed anyway, because it put the call's audio on the same machine as
+    # the agent, and then each end's echo cancellation deleted the signal the
+    # other needed. Measured 12 Sep: answered, silence both ways.
+    #
+    # These checks exist so it does not come back. The failure was invisible
+    # from the code -- it looked like a working feature -- so the only defence
+    # is a test that says no.
+    s.check("there is no auto-dial", "def dial_phone" not in SERVER_SRC)
+    s.check("nothing hands a tel: URL to the system",
+            'f"tel:{' not in SERVER_SRC and '"tel:' not in SERVER_SRC)
+    s.check("no facetime-audio: either",
+            "facetime-audio" not in SERVER_SRC)
+    s.check("the AUTO_DIAL switch is gone from the code",
+            "AUTO_DIAL" not in SERVER_SRC)
+    s.check("...and from the example env, so nobody sets it hopefully",
+            "AUTO_DIAL" not in (ROOT / ".env.example").read_text(encoding="utf-8"))
+    s.check("the bridge does not claim a dial it cannot make",
+            "auto_dialled" not in SERVER_SRC)
+    s.check("approval tells the operator to dial by hand",
+            "by hand" in SERVER_SRC and "speakerphone" in SERVER_SRC)
+    # The reason has to stay next to the code, or the next person re-adds it.
+    s.check("and the reason it cannot work is recorded where it was removed",
+            "echo" in SERVER_SRC and "air between" in SERVER_SRC)
+    s.check("two humans is now the design, not a concession",
+            "is not a compromise here" in SERVER_SRC)
 
     # --- booking links ----------------------------------------------------
     places_src = (ROOT / "places.py").read_text(encoding="utf-8")

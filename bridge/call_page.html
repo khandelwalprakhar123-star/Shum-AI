@@ -5,114 +5,207 @@
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>Shum-AI — call desk</title>
 <style>
+  /* ------------------------------------------------------------------
+     The transcript is the product.
+
+     Someone is standing over this laptop while a synthetic voice talks to a
+     real restaurant on their behalf. The one thing they need is to read what
+     is being said, from a metre away, without leaning in. So the transcript
+     gets the type size, the contrast and the screen space, and everything
+     else on this page shrinks until it stops competing with it.
+     ------------------------------------------------------------------ */
   :root {
-    --bg: #0b0d10; --panel: #14181d; --line: #232a32;
-    --ink: #e8edf2; --dim: #8b98a5; --accent: #6ee7a8;
-    --warn: #f5b545; --bad: #f06d6d;
-    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+    --bg: #f5f5f7;            /* the grey Apple puts behind white cards */
+    --card: #ffffff;
+    --hair: rgba(0, 0, 0, 0.09);
+    --ink: #1d1d1f;
+    --ink-2: #6e6e73;
+    --ink-3: #a1a1a6;
+    --blue: #007aff;
+    --green: #34c759;
+    --orange: #ff9500;
+    --red: #ff3b30;
+    --agent: #007aff;         /* agent bubbles: filled blue, like a sent message */
+    --them: #e9e9eb;          /* restaurant bubbles: grey, like a received one */
+    --radius: 18px;
+    --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
   }
   * { box-sizing: border-box; }
+  html, body { height: 100%; }
   body {
-    margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--ink);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    margin: 0;
+    background: var(--bg);
+    color: var(--ink);
+    font: 15px/1.47 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Helvetica Neue", sans-serif;
+    -webkit-font-smoothing: antialiased;
+    display: flex;
+    justify-content: center;
+    padding: 22px 16px 0;
   }
-  .wrap { max-width: 720px; margin: 0 auto; }
-  h1 { font-size: 19px; margin: 0 0 2px; letter-spacing: -0.01em; }
-  .sub { color: var(--dim); font-size: 13px; margin-bottom: 22px; }
-  .card {
-    background: var(--panel); border: 1px solid var(--line);
-    border-radius: 12px; padding: 18px; margin-bottom: 14px;
+  .wrap {
+    width: 100%; max-width: 780px; height: calc(100vh - 22px);
+    display: flex; flex-direction: column; gap: 10px;
   }
-  .card h2 {
-    font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em;
-    color: var(--dim); margin: 0 0 12px; font-weight: 600;
+
+  /* ---- header ---- */
+  header {
+    flex: none; display: flex; align-items: center; gap: 12px;
   }
-  /* ---- The microphone level meter. ----
-     This is the only diagnostic that matters for acoustic coupling. If this bar
-     does not move while the restaurant's voice comes out of the phone speaker,
-     coupling has failed and no amount of prompt tuning will fix it. Move the
-     phone, raise its volume, or take the laptop off mute. Everything else on
-     this page is cosmetic by comparison. */
-  .meter { height: 26px; background: #0a0c0f; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; position: relative; }
-  .meter > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), #38bdf8); transition: width 60ms linear; }
-  .meter > span { position: absolute; inset: 0; display: grid; place-items: center; font: 600 11px var(--mono); color: var(--ink); mix-blend-mode: difference; }
-  .peak { font: 12px var(--mono); color: var(--dim); margin-top: 8px; }
-  .grid { display: grid; grid-template-columns: 132px 1fr; gap: 8px 14px; font-size: 14px; }
-  .grid dt { color: var(--dim); }
-  .grid dd { margin: 0; font-variant-numeric: tabular-nums; }
-  .num { font-family: var(--mono); }
+  h1 { font: 600 25px/1.2 inherit; letter-spacing: -0.021em; margin: 0; }
+
+  /* ---- the booking strip: one line, tabular, deliberately quiet ---- */
+  .strip {
+    flex: none; background: var(--card); border-radius: var(--radius);
+    padding: 12px 18px; display: flex; flex-wrap: wrap; gap: 6px 26px;
+    align-items: baseline; box-shadow: 0 1px 2px rgba(0,0,0,0.045);
+  }
+  .strip .f { display: flex; flex-direction: column; gap: 1px; }
+  .strip .k {
+    font-size: 11px; font-weight: 590; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--ink-3);
+  }
+  .strip .v { font-size: 15px; font-weight: 450; }
+  .strip .v.num { font-variant-numeric: tabular-nums; }
+  .strip .f.grow { flex: 1 1 180px; min-width: 0; }
+  .strip .v.clip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  /* ---- the transcript: the hero ---- */
+  .thread {
+    flex: 1 1 auto; min-height: 0; overflow-y: auto;
+    background: var(--card); border-radius: var(--radius);
+    padding: 24px 22px; box-shadow: 0 1px 2px rgba(0,0,0,0.045);
+    /* Deliberately no smooth scrolling here. Under it, `scrollTop =
+       scrollHeight` becomes an animation, and every new turn restarts it from
+       wherever it got to. Measured with turns 120ms apart: the newest line
+       ended up 1081px off-screen and never arrived, so the operator would be
+       reading the conversation from a minute ago while the agent talks. The
+       whole point of this page is seeing the current line. */
+  }
+  .turn { display: flex; margin-bottom: 16px; }
+  .turn.agent { justify-content: flex-end; }
+  .bubble {
+    max-width: 78%; padding: 13px 19px; border-radius: 22px;
+    font-size: 22px; line-height: 1.42; letter-spacing: -0.015em;
+    font-weight: 420; word-wrap: break-word;
+  }
+  .turn.agent .bubble { background: var(--agent); color: #fff; border-bottom-right-radius: 7px; }
+  .turn.them  .bubble { background: var(--them);  color: var(--ink); border-bottom-left-radius: 7px; }
+  .who {
+    font-size: 11px; font-weight: 590; letter-spacing: 0.05em;
+    text-transform: uppercase; color: var(--ink-3);
+    margin: 0 6px 5px; }
+  .turn.agent .who { text-align: right; }
+  .side { display: flex; flex-direction: column; max-width: 78%; }
+
+  /* System lines and errors live in the thread so they cannot be missed,
+     but at a size that says "not part of the conversation". */
+  .note {
+    text-align: center; color: var(--ink-3); font-size: 12.5px;
+    margin: 12px auto 14px; max-width: 84%;
+  }
+  .note.err {
+    color: var(--red); font-weight: 500; background: rgba(255,59,48,0.07);
+    padding: 9px 14px; border-radius: 12px;
+  }
+  .empty { color: var(--ink-3); font-size: 16px; line-height: 1.6; text-align: center;
+           margin: 12vh auto 0; max-width: 30em; }
+  .empty b { display: block; color: var(--ink-2); font-size: 20px; font-weight: 500; margin-bottom: 7px; }
+
+  /* ---- footer: mic meter + controls, sticky at the bottom ---- */
+  footer {
+    flex: none; background: var(--card); border-radius: var(--radius);
+    padding: 13px 18px 14px; margin-bottom: 12px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.045);
+  }
+  /* The microphone meter is the only diagnostic that matters for acoustic
+     coupling. If it does not move while the restaurant's voice comes out of
+     the phone speaker, coupling has failed and no prompt tuning will fix it.
+     It is small here, but it is never hidden. */
+  .meterRow { display: flex; align-items: center; gap: 12px; }
+  .meter {
+    flex: 1 1 auto; height: 7px; border-radius: 999px;
+    background: #e9e9eb; overflow: hidden;
+  }
+  .meter > i {
+    display: block; height: 100%; width: 0%; border-radius: 999px;
+    background: var(--green); transition: width 70ms linear;
+  }
+  .mlabel {
+    flex: none; font: 500 12px var(--mono); color: var(--ink-3);
+    min-width: 190px; text-align: right; font-variant-numeric: tabular-nums;
+  }
+  .controls { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; margin-top: 12px; }
   button {
-    font: 600 14px inherit; padding: 11px 20px; border-radius: 9px;
-    border: 1px solid var(--line); background: #1d242c; color: var(--ink); cursor: pointer;
+    font: 590 14.5px inherit; padding: 9px 19px; border-radius: 980px;
+    border: none; background: #e9e9eb; color: var(--ink); cursor: pointer;
+    transition: filter 120ms ease;
   }
-  button.go { background: var(--accent); color: #06110c; border-color: transparent; }
-  button.stop { background: #2a1a1a; color: var(--bad); border-color: #45282a; }
-  button:disabled { opacity: 0.4; cursor: not-allowed; }
-  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-  .pill { display: inline-block; font: 600 11px var(--mono); padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
-  .pill.on { color: #06110c; background: var(--accent); border-color: transparent; }
-  .pill.warn { color: #1a1205; background: var(--warn); border-color: transparent; }
-  .pill.bad { color: #fff; background: var(--bad); border-color: transparent; }
-  #log { font: 12.5px/1.55 var(--mono); max-height: 300px; overflow-y: auto; white-space: pre-wrap; }
-  #log div { padding: 4px 0; border-bottom: 1px solid #1a1f26; }
-  #log .ai { color: var(--accent); }
-  #log .them { color: #7dd3fc; }
-  #log .sys { color: var(--dim); }
-  #log .err { color: var(--bad); }
-  .rail { border-left: 3px solid var(--warn); padding-left: 12px; color: var(--warn); font-size: 13px; }
-  .script { font-size: 13px; color: var(--dim); }
-  .script b { color: var(--ink); }
-  @media (max-width: 480px) { .grid { grid-template-columns: 1fr; gap: 2px 0; } .grid dt { margin-top: 8px; } }
+  button:hover:not(:disabled) { filter: brightness(0.95); }
+  button.go { background: var(--blue); color: #fff; }
+  button.stop { background: rgba(255,59,48,0.11); color: var(--red); }
+  button:disabled { opacity: 0.38; cursor: not-allowed; }
+  .pill {
+    font: 590 12px inherit; padding: 5px 12px; border-radius: 980px;
+    background: #e9e9eb; color: var(--ink-2); letter-spacing: -0.005em;
+  }
+  .pill.on { background: rgba(52,199,89,0.15); color: #248a3d; }
+  .pill.warn { background: rgba(255,149,0,0.16); color: #9a5a00; }
+  .pill.bad { background: rgba(255,59,48,0.12); color: #c9271e; }
+  .pill.blue { background: rgba(0,122,255,0.13); color: #0062cc; }
+  .rail {
+    margin-top: 11px; font-size: 12.5px; padding: 10px 13px; border-radius: 12px;
+    background: rgba(255,149,0,0.1); color: #8a4f00;
+  }
+  .rail b { font-weight: 610; }
+  .rail .num { font-variant-numeric: tabular-nums; font-weight: 590; }
+
+  @media (max-width: 620px) {
+    body { padding: 18px 11px 0; }
+    h1 { font-size: 23px; }
+    .bubble { font-size: 18px; padding: 11px 16px; }
+    .mlabel { min-width: 0; font-size: 11px; }
+    .thread { padding: 18px 15px; }
+  }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <h1>Shum-AI — call desk</h1>
-  <div class="sub">The agent runs in this tab over WebRTC and talks through your laptop's speakers and microphone. You dial; it speaks.</div>
+  <header>
+    <h1>Call desk</h1>
+    <span class="pill" id="stPill">waiting</span>
+  </header>
 
-  <div class="card">
-    <h2>Microphone level — watch this, not the transcript</h2>
-    <div class="meter"><i id="bar"></i><span id="barTxt">idle</span></div>
-    <div class="peak" id="peak">peak 0.00 · no stream</div>
+  <div class="strip">
+    <div class="f grow"><span class="k">Restaurant</span><span class="v clip" id="bName">—</span></div>
+    <div class="f"><span class="k">Number</span><span class="v num" id="bNumber">—</span></div>
+    <div class="f"><span class="k">Party</span><span class="v num" id="bParty">—</span></div>
+    <div class="f grow"><span class="k">When</span><span class="v clip" id="bWhen">—</span></div>
+    <div class="f"><span class="k">Under</span><span class="v" id="bBooker">—</span></div>
   </div>
 
-  <div class="card">
-    <h2>Booking</h2>
-    <dl class="grid" id="booking">
-      <dt>Status</dt><dd><span class="pill" id="stPill">waiting for approval</span></dd>
-      <dt>Restaurant</dt><dd id="bName">—</dd>
-      <dt>Dialling</dt><dd class="num" id="bNumber">—</dd>
-      <dt>Party</dt><dd class="num" id="bParty">—</dd>
-      <dt>When</dt><dd id="bWhen">—</dd>
-      <dt>Under name</dt><dd id="bBooker">—</dd>
-      <dt>Callback</dt><dd class="num" id="bCallback">—</dd>
-      <dt>Constraints</dt><dd id="bConstraints">—</dd>
-    </dl>
-    <div id="railNote" style="margin-top:14px" hidden></div>
-  </div>
-
-  <div class="card">
-    <h2>Run the call</h2>
-    <p class="script">
-      The microphone arms itself if you have allowed it here before — check the bar moves.
-      <b>Then:</b> dial the number above on your phone, put it on <b>speakerphone</b> beside the
-      laptop mic, and approve in Telegram. The agent starts on its own and discloses that it is
-      an AI in its first sentence. <b>Start agent</b> below is only needed if you want to begin
-      before the approval lands.
-    </p>
-    <div class="row" style="margin-top:14px">
-      <button id="armBtn">Arm microphone</button>
-      <button id="startBtn" class="go" disabled>Start agent</button>
-      <button id="endBtn" class="stop" disabled>End call</button>
-      <span class="pill" id="connPill">disconnected</span>
-      <span class="pill" id="modePill">—</span>
+  <div class="thread" id="thread">
+    <div class="empty" id="empty">
+      <b>No call yet</b>
+      Check the level bar below moves, dial the number on your phone, put it on
+      speakerphone beside the laptop, then approve in Telegram.<br />
+      The agent starts itself and says it is an AI in its first sentence.
     </div>
   </div>
 
-  <div class="card">
-    <h2>Transcript</h2>
-    <div id="log"><div class="sys">nothing yet</div></div>
-  </div>
+  <footer>
+    <div class="meterRow">
+      <span class="pill" id="connPill">mic off</span>
+      <div class="meter"><i id="bar"></i></div>
+      <span class="mlabel" id="peak">no stream</span>
+    </div>
+    <div class="controls">
+      <button id="armBtn">Arm microphone</button>
+      <button id="startBtn" class="go" disabled>Start agent</button>
+      <button id="endBtn" class="stop" disabled>End call</button>
+      <span class="pill" id="modePill">idle</span>
+    </div>
+    <div id="railNote" hidden></div>
+  </footer>
 </div>
 
 <script type="module">
@@ -124,16 +217,48 @@ const state = {
   armed: false, running: false, startedFor: null, conversationId: null,
 };
 
-function log(kind, text) {
-  const box = $("log");
-  if (box.firstElementChild?.classList.contains("sys") && box.children.length === 1
-      && box.firstElementChild.textContent === "nothing yet") box.innerHTML = "";
+function clearEmpty() {
+  const e = $("empty");
+  if (e) e.remove();
+}
+
+// Two kinds of line, deliberately unequal. What the agent and the restaurant
+// said is the conversation, and gets a bubble at reading size. Everything else
+// — status, diagnostics, failures — is a small note, present but not competing.
+function say(who, text) {
+  clearEmpty();
+  const thread = $("thread");
+  const turn = document.createElement("div");
+  turn.className = "turn " + who;
+  const side = document.createElement("div");
+  side.className = "side";
+  const label = document.createElement("div");
+  label.className = "who";
+  label.textContent = who === "agent" ? "Agent" : "Restaurant";
+  const bubble = document.createElement("div");
+  bubble.className = "bubble";
+  bubble.textContent = text;
+  side.append(label, bubble);
+  turn.append(side);
+  thread.append(turn);
+  thread.scrollTop = thread.scrollHeight;
+}
+
+function note(text, isError = false) {
+  clearEmpty();
+  const thread = $("thread");
   const row = document.createElement("div");
-  row.className = kind;
-  const t = new Date().toLocaleTimeString([], { hour12: false });
-  row.textContent = `${t}  ${text}`;
-  box.appendChild(row);
-  box.scrollTop = box.scrollHeight;
+  row.className = isError ? "note err" : "note";
+  row.textContent = text;
+  thread.append(row);
+  thread.scrollTop = thread.scrollHeight;
+}
+
+// Kept as `log` so every call site below reads the same as before.
+function log(kind, text) {
+  if (kind === "ai") return say("agent", text);
+  if (kind === "them") return say("them", text);
+  note(text, kind === "err");
 }
 const pill = (el, text, cls = "") => { el.textContent = text; el.className = "pill " + cls; };
 
@@ -141,10 +266,10 @@ const pill = (el, text, cls = "") => { el.textContent = text; el.className = "pi
 // Microphone metering
 // ------------------------------------------------------------------
 // getUserMedia hangs FOREVER if the permission prompt is dismissed rather than
-// answered — no error, no rejection, the page just sits there looking fine
-// (gotcha 13). So: check the permission state first to give an honest message,
-// and race the call against a timeout so a dismissed prompt surfaces as a
-// failure instead of a freeze.
+// answered — no error, no rejection, the page just sits there looking fine.
+// So: check the permission state first to give an honest message, and race the
+// call against a timeout so a dismissed prompt surfaces as a failure instead
+// of a freeze.
 async function armMicrophone() {
   try {
     if (navigator.permissions?.query) {
@@ -195,8 +320,10 @@ async function armMicrophone() {
     peak = Math.max(peak, rms);
     if (rms > 0.02) everMoved = true;
     $("bar").style.width = pct.toFixed(1) + "%";
-    $("barTxt").textContent = rms > 0.004 ? `${(rms * 100).toFixed(1)}` : "silence";
-    $("peak").textContent = `peak ${peak.toFixed(3)} · ${everMoved ? "coupling confirmed" : "no audio seen yet — talk into the phone"}`;
+    $("bar").style.background = rms > 0.004 ? "var(--green)" : "#e9e9eb";
+    $("peak").textContent = everMoved
+      ? `peak ${peak.toFixed(3)} · coupling confirmed`
+      : `peak ${peak.toFixed(3)} · talk into the phone`;
     requestAnimationFrame(tick);
   })();
 
@@ -204,13 +331,29 @@ async function armMicrophone() {
   $("armBtn").disabled = true;
   $("startBtn").disabled = false;
   pill($("connPill"), "mic live", "on");
-  log("sys", "Microphone armed. Speak into the phone's earpiece side and confirm the bar moves BEFORE you start the agent.");
+  log("sys", "Microphone armed. Confirm the bar moves BEFORE you start the agent.");
   return true;
 }
 
 // ------------------------------------------------------------------
 // The agent
 // ------------------------------------------------------------------
+// The agent's prompt drops when_text straight into a sentence, so a chat that
+// said "8pm" made it say "a table for 6 people 8pm" out loud to a real
+// restaurant on the 15:14 call. It recovered, but only because the person on
+// the other end was forgiving. Give the phrase a preposition unless the chat
+// already supplied one, and never rewrite what the chat actually said --
+// pending.when_text is left alone, so the booking record and the calendar
+// entry still carry the group's own words.
+function spokenWhen(text) {
+  const t = String(text || "").trim();
+  if (!t) return "this evening";
+  // Weekdays need the suffix: /fri\b/ does not match "friday", which turned
+  // "friday at 9" into "at friday at 9".
+  const leads = /^((at|on|in|for|around|about|by|from|this|that|today|tonight|tomorrow|next|after|before)\b|(mon|tue|wed|thu|fri|sat|sun)[a-z]*\b)/i;
+  return leads.test(t) ? t : "at " + t;
+}
+
 async function startAgent() {
   if (state.running) return;
   if (!state.cfg?.agent_id) { log("err", "No ELEVENLABS_AGENT_ID in .env — the bridge served an empty agent id."); return; }
@@ -231,7 +374,7 @@ async function startAgent() {
   const vars = {
     restaurant_name: String(p.restaurant_display || p.restaurant_name || "your restaurant"),
     party_size: String(p.party_size ?? 4),
-    when_text: String(p.when_text || "this evening"),
+    when_text: spokenWhen(p.when_text),
     booking_name: String(p.booking_name || state.cfg.booker_name || "a guest"),
     callback_number: String(p.callback_number || state.cfg.callback_number || ""),
     constraints_text: (p.constraints || []).join("; ") || "no special requirements",
@@ -250,16 +393,18 @@ async function startAgent() {
         // Keep the id: it is how the bridge asks ElevenLabs for the agent's own
         // data-collection result once the call has been analysed server-side.
         state.conversationId = conversationId || null;
-        pill($("connPill"), "connected", "on");
+        pill($("connPill"), "on the call", "on");
         log("sys", `connected · conversation ${conversationId || "?"}`);
       },
       onDisconnect: () => { pill($("connPill"), "disconnected"); finish("disconnected"); },
       onError: (msg, ctx) => log("err", `agent error: ${msg} ${ctx ? JSON.stringify(ctx) : ""}`),
-      onModeChange: ({ mode }) => pill($("modePill"), mode === "speaking" ? "agent speaking" : "listening", mode === "speaking" ? "on" : ""),
+      onModeChange: ({ mode }) => pill($("modePill"),
+        mode === "speaking" ? "agent speaking" : "listening",
+        mode === "speaking" ? "blue" : ""),
       onStatusChange: ({ status }) => log("sys", `status: ${status}`),
       onMessage: ({ message, source }) => {
         state.transcript.push({ source, message, at: new Date().toISOString() });
-        log(source === "user" ? "them" : "ai", `${source === "user" ? "restaurant" : "agent"}: ${message}`);
+        log(source === "user" ? "them" : "ai", message);
         // Push it to the bridge immediately so the group watches the call
         // happen instead of waiting for a summary. Fire and forget: a dropped
         // turn must never interrupt a live phone call, and the bridge
@@ -295,6 +440,7 @@ async function finish(reason) {
   state.running = false;
   $("endBtn").disabled = true;
   $("startBtn").disabled = !state.armed;
+  pill($("modePill"), "idle");
   log("sys", `call finished (${reason}) · ${state.transcript.length} turns`);
 
   try {
@@ -322,33 +468,42 @@ async function finish(reason) {
 // Poll the bridge
 // ------------------------------------------------------------------
 function renderPending(p) {
-  const has = p && Object.keys(p).length > 0;
-  $("bName").textContent = has ? (p.restaurant_display || p.restaurant_name || "—") : "—";
-  $("bNumber").textContent = has ? (p.dial_number || "—") : "—";
+  // "Is the object non-empty" is the wrong question. pending_call.json is
+  // patched in place and never emptied, so after a finished call it still
+  // holds a status, a transcript and the last number dialled. Treating that
+  // as a live booking showed the amber consent rail — "this dials a real
+  // venue" — over a blank strip with nothing pending, and left a stale number
+  // on screen for an operator to dial. Both are worse than showing nothing.
+  //
+  // A call is live only when there is somewhere to dial, something to call it,
+  // and the bridge has not already closed it out.
+  const has = !!(p && p.dial_number
+                 && (p.restaurant_display || p.restaurant_name)
+                 && p.status !== "done");
+  $("bName").textContent = has ? (p.restaurant_display || p.restaurant_name) : "—";
+  $("bNumber").textContent = has ? p.dial_number : "—";
   $("bParty").textContent = has ? (p.party_size ?? "—") : "—";
   $("bWhen").textContent = has ? (p.when_text || "—") : "—";
   $("bBooker").textContent = has ? (p.booking_name || "—") : "—";
-  $("bCallback").textContent = has ? (p.callback_number || "—") : "—";
-  $("bConstraints").textContent = has && (p.constraints || []).length ? p.constraints.join(" · ") : "—";
 
-  const st = has ? (p.status || "pending") : "waiting for approval";
-  pill($("stPill"), st, st === "dialing" ? "on" : st === "done" ? "" : "warn");
+  const st = has ? (p.status || "pending") : "waiting";
+  pill($("stPill"), st, st === "dialing" ? "on" : "warn");
 
-  const note = $("railNote");
+  const rail = $("railNote");
   if (has && p.demo_override) {
-    note.hidden = false;
-    note.className = "rail";
-    note.innerHTML = `<b>Safety rail active.</b> DEMO_PHONE is set, so this call goes to
+    rail.hidden = false;
+    rail.className = "rail";
+    rail.innerHTML = `<b>Safety rail active.</b> DEMO_PHONE is set, so this call goes to
       <span class="num">${p.dial_number}</span> — a number you control — not to
       ${p.real_number ? `<span class="num">${p.real_number}</span>, ` : ""}the restaurant.
       The group chat was told this too.`;
   } else if (has) {
-    note.hidden = false;
-    note.className = "rail";
-    note.innerHTML = `<b>Live call.</b> This dials a real venue that gave consent in advance.
+    rail.hidden = false;
+    rail.className = "rail";
+    rail.innerHTML = `<b>Live call.</b> This dials a real venue that gave consent in advance.
       The agent discloses it is an AI in its first sentence. If a table is booked, turn up or cancel it.`;
   } else {
-    note.hidden = true;
+    rail.hidden = true;
   }
 }
 
@@ -371,7 +526,6 @@ async function boot() {
   try {
     state.cfg = await (await fetch("/config", { cache: "no-store" })).json();
     if (!state.cfg.agent_id_present) log("err", "ELEVENLABS_AGENT_ID is not set in .env.");
-    else log("sys", `bridge up · agent ${state.cfg.agent_id.slice(0, 10)}…`);
   } catch {
     log("err", "Cannot reach the bridge on :8080. Start it with  python3 bridge/server.py");
   }
@@ -383,11 +537,11 @@ async function boot() {
   setInterval(poll, 1200);
 }
 
-// Arm the microphone automatically when Chrome has already been told yes for
-// this origin. getUserMedia only prompts the FIRST time; after that the grant
-// is remembered per-origin, so making the operator press a button on every
-// reload is pure ceremony. The button stays for the first run, and for anyone
-// whose permission state is "prompt".
+// Arm the microphone automatically when the browser has already been told yes
+// for this origin. getUserMedia only prompts the FIRST time; after that the
+// grant is remembered per-origin, so making the operator press a button on
+// every reload is pure ceremony. The button stays for the first run, and for
+// anyone whose permission state is "prompt".
 //
 // Arming a microphone is not initiating a call and carries no safety meaning:
 // the agent still does not speak until an approval arrives, and a human still
@@ -397,7 +551,6 @@ async function autoArm() {
     if (!navigator.permissions?.query) return;
     const st = await navigator.permissions.query({ name: "microphone" });
     if (st.state === "granted") {
-      log("sys", "microphone already permitted for this origin \u2014 arming automatically");
       await armMicrophone();
     }
   } catch { /* Safari and some Chromium builds do not expose the descriptor */ }
