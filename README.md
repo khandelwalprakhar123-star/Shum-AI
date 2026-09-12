@@ -135,6 +135,18 @@ open "/Applications/Python 3.14/Install Certificates.command"
 ```
 That installer does not wire Python into the system keychain — it expects a `cert.pem` it never creates. The symptom is vicious: `curl https://...` works perfectly while *every* `urllib` call in the same shell dies with `CERTIFICATE_VERIFY_FAILED`. Since every network call here goes through `urllib`, nothing works at all, and the error points at certificates rather than the one-line fix. Both `bot.py` and `bridge/server.py` now check the trust store at startup and print the exact command if it's empty.
 
+**Check everything before it matters:**
+```bash
+python3 preflight.py
+```
+Every dependency, checked live, each failure printing the exact fix. It exists because this project's failure modes all masquerade as something else: an empty TLS store looks like a network outage, a retired model looks like a bad prompt, and a bot with privacy mode still on looks like a bot that is ignoring you.
+
+**See the brain work without a Telegram bot or a phone call:**
+```bash
+python3 dryrun.py            # or: python3 dryrun.py my_chat.txt
+```
+This is exactly what `/decide` does — read a conversation, name the constraints with the quotes they came from, search, pick three — minus the chat and the call. Roughly 8 seconds end to end.
+
 **Run, in two terminals:**
 ```bash
 python3 bridge/server.py      # then open http://localhost:8080/
@@ -162,6 +174,20 @@ python3 tests/run.py
 ```
 
 The network is mocked entirely — no Telegram, no Gemini, no Overpass, no Exa — and the *real* code is driven against it. The runner exits non-zero on failure, crash **or skip**: a suite silently not running while the report says "0 failed" is worse than a red.
+
+## Stack
+
+### Measured latency of one `/decide`
+
+| Stage | Time |
+|---|---|
+| Constraint extraction (Gemini) | 2.6s |
+| Candidate search (fresh cache) | 0.01s |
+| Exa discovery | 1.8s |
+| Choosing three (Gemini) | 3.8s |
+| **Total** | **~8s** |
+
+It was 79 seconds before two fixes: Gemini was spending its whole token budget on thinking and returning truncated JSON, and a live Overpass round trip was costing up to 18 seconds on every call. Both are described in the commit history. A `/decide` that six impatient people watch for 79 seconds is a different product from one that answers in eight.
 
 ## Stack
 

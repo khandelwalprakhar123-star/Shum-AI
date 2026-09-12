@@ -77,6 +77,20 @@ def gemini_ok(obj):
     )
 
 
+def gemini_truncated(partial: str = '{"party_size": 6, "hard": [{"constra',
+                     thoughts: int = 1962):
+    """A response that hit MAX_TOKENS because thinking ate the budget.
+
+    This is what the real failure looked like: finishReason MAX_TOKENS, ~1962
+    tokens spent thinking, and a fragment of JSON that no parser can salvage.
+    """
+    return json_response({
+        "candidates": [{"content": {"parts": [{"text": partial}]},
+                        "finishReason": "MAX_TOKENS"}],
+        "usageMetadata": {"thoughtsTokenCount": thoughts, "candidatesTokenCount": 71},
+    })
+
+
 def openrouter_ok(obj):
     return json_response({"choices": [{"message": {"content": json.dumps(obj)}}]})
 

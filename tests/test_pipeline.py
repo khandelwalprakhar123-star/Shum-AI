@@ -11,8 +11,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pipeline
-from harness import (FakeNet, Suite, gemini_ok, http_error, json_response,
-                     openrouter_ok, timeout_error, url_error)
+from harness import (FakeNet, Suite, gemini_ok, gemini_truncated, http_error,
+                     json_response, openrouter_ok, timeout_error, url_error)
 
 CHAT = """Marcus: where friday
 Priya: anywhere but hotpot please
@@ -33,7 +33,7 @@ GOOD = {
 
 
 def run() -> Suite:
-    s = Suite("pipeline", expect_at_least=26)
+    s = Suite("pipeline", expect_at_least=46)
     os.environ["GEMINI_API_KEY"] = "AQ.test-key-not-real"
     os.environ.pop("OPENROUTER_API_KEY", None)
 
@@ -63,6 +63,47 @@ def run() -> Suite:
     s.eq("total network failure falls back to keywords", out["source"], "keyword")
     s.eq("keyword fallback still finds the pork constraint",
          [h["constraint"] for h in out["hard"]], ["no pork"])
+
+    # --- MAX_TOKENS: the bug that reported success and served worse output --
+    # gemini-3.5-flash spent 1,962 of 2,048 tokens thinking and had 71 left for
+    # the answer. The truncated JSON failed to parse, the pipeline fell silently
+    # into keyword extraction, and the log said "gemini ok".
+    with FakeNet([gemini_truncated(), gemini_ok(GOOD)]) as net:
+        out = pipeline.extract_constraints(CHAT)
+    s.eq("a truncated MAX_TOKENS response moves to the next model", len(net.requests), 2)
+    s.eq("and the next model's answer is used", out["party_size"], 6)
+    s.eq("a truncated response is never treated as a success", out["source"], "gemini")
+
+    with FakeNet([gemini_truncated()] * 4, strict=False) as net:
+        out = pipeline.extract_constraints(CHAT)
+    s.eq("every model truncating degrades honestly to keywords", out["source"], "keyword")
+
+    # The config that prevents it.
+    with FakeNet([gemini_ok(GOOD)]) as net:
+        pipeline.extract_constraints(CHAT)
+    body = json.loads(net.last()["body"])
+    s.eq("thinking is disabled so the budget goes to the answer",
+         body["generationConfig"]["thinkingConfig"]["thinkingBudget"], 0)
+    s.check("the output budget has real headroom",
+            body["generationConfig"]["maxOutputTokens"] >= 4096,
+            f"got {body['generationConfig']['maxOutputTokens']}")
+
+    # A model that rejects thinkingConfig must not abort the chain over a
+    # config key. Same model, retried without it.
+    with FakeNet([http_error(400), gemini_ok(GOOD)]) as net:
+        out = pipeline.extract_constraints(CHAT)
+    s.eq("a 400 on thinkingConfig retries the SAME model without it", len(net.requests), 2)
+    s.contains("the retry really is the same model", net.urls()[1], pipeline.GEMINI_MODELS[0])
+    s.check("the retry drops thinkingConfig",
+            "thinkingConfig" not in json.loads(net.requests[1]["body"])["generationConfig"])
+    s.eq("and the retry's answer is used", out["party_size"], 6)
+
+    # But a genuine 400 on both attempts is a real fault, not a config quirk.
+    with FakeNet([http_error(400), http_error(400)], strict=False) as net:
+        out = pipeline.extract_constraints(CHAT)
+    s.eq("a 400 on both attempts aborts rather than trying every model",
+         len(net.requests), 2)
+    s.eq("and degrades honestly", out["source"], "keyword")
 
     # --- the key goes in a header, never the URL ---------------------------
     with FakeNet([gemini_ok(GOOD)]) as net:
@@ -126,6 +167,50 @@ def run() -> Suite:
     with FakeNet([json_response({"candidates": [{"content": {"parts": [{"text": "nope"}]}}]})], strict=False):
         out = pipeline.extract_constraints(CHAT)
     s.eq("unsalvageable output degrades rather than crashing", out["source"], "keyword")
+
+    # The fallback vendor's model ids must be real ones. The original defaults
+    # here were plausible-looking names that all 404'd, making the second
+    # vendor decorative.
+    s.check("openrouter models are namespaced ids",
+            all("/" in m for m in pipeline.OPENROUTER_MODELS))
+    s.check("openrouter models are free-tier tagged",
+            all(m.endswith(":free") for m in pipeline.OPENROUTER_MODELS),
+            f"got {pipeline.OPENROUTER_MODELS}")
+    s.check("no music or domain-specific models in the text chain",
+            not any(bad in m for m in pipeline.OPENROUTER_MODELS
+                    for bad in ("lyria", "-sante", "-fin", "-vl")))
+
+    # --- JSON salvage, against the shapes models actually emit -------------
+    # The expensive one: gemini-3.5-flash returns a complete, correct object
+    # and then appends a STRAY EXTRA CLOSING BRACE. json.loads rejects the lot
+    # with "Extra data", and a greedy brace regex matches THROUGH the stray
+    # brace to the last one, so both salvage paths failed. Extraction silently
+    # fell through to the slower vendor and the only symptom was a 53s /decide.
+    salvage = {
+        "clean object": ('{"a": 1}', {"a": 1}),
+        "stray trailing brace": ('{"a": 1, "b": {"c": 2}}\n}', {"a": 1, "b": {"c": 2}}),
+        "two stray braces": ('{"a": 1}\n}\n}', {"a": 1}),
+        "fenced json": ('```json\n{"a": 1}\n```', {"a": 1}),
+        "fenced with a stray brace inside": ('```json\n{"a": 1}\n}\n```', {"a": 1}),
+        "prose either side": ('Sure!\n{"a": 1}\nHope that helps.', {"a": 1}),
+        "a brace inside a string value": ('{"a": "has } brace"}\n}', {"a": "has } brace"}),
+        "leading fragment then a good object": ('"oops": 1}\n{"a": 1}', {"a": 1}),
+        "trailing punctuation": ('{"a": 1},,,', {"a": 1}),
+    }
+    for label, (raw, want) in salvage.items():
+        s.eq(f"salvage: {label}", pipeline._parse_json(raw), want)
+
+    for label, raw in {"no braces": "nothing here", "empty string": "",
+                       "only closing braces": "}}}"}.items():
+        s.raises(f"salvage refuses {label}", ValueError, pipeline._parse_json, raw)
+
+    # End to end through the real code path, not just the parser.
+    with FakeNet([json_response({"candidates": [{"content": {"parts": [
+            {"text": json.dumps(GOOD) + "\n}"}]}, "finishReason": "STOP"}]})]) as net:
+        out = pipeline.extract_constraints(CHAT)
+    s.eq("a stray brace no longer costs us the model", out["source"], "gemini")
+    s.eq("and the constraints survive intact", out["party_size"], 6)
+    s.eq("one call, no fallback to a second vendor", len(net.requests), 1)
 
     # --- OpenRouter is a real second vendor, not decoration ---------------
     os.environ["OPENROUTER_API_KEY"] = "sk-or-test"

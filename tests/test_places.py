@@ -13,12 +13,14 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import time
+
 import places
 from harness import FakeNet, Suite, http_error, overpass_ok, timeout_error, url_error
 
 
 def run() -> Suite:
-    s = Suite("places", expect_at_least=40)
+    s = Suite("places", expect_at_least=48)
 
     # --- phone normalisation: every real-world shape ----------------------
     good = {
@@ -121,10 +123,40 @@ def run() -> Suite:
         s.eq("layer 1: live Overpass is used", live[0]["name"], "Live Place")
         s.check("layer 1 writes the cache for later", places.CACHE_PATH.exists())
 
+        # A FRESH cache short-circuits before any network call at all. This is
+        # the demo path: /decide should not spend 18 seconds on Overpass while
+        # six people watch a typing indicator.
+        with FakeNet([], strict=True) as net:
+            hot = places.search_places()
+        s.eq("a fresh cache is served with ZERO network calls", len(net.requests), 0)
+        s.eq("and returns the cached places", hot[0]["name"], "Live Place")
+        s.check("cache age is reported", places.cache_age_seconds() is not None)
+        s.check("a just-written cache is seconds old", places.cache_age_seconds() < 60)
+
+        # force_live must be able to ignore a fresh cache.
+        with FakeNet([overpass_ok(elements), overpass_ok([]), overpass_ok([])]) as net:
+            places.search_places(force_live=True)
+        s.check("force_live bypasses a fresh cache", len(net.requests) > 0)
+
+        # A STALE cache must not be trusted over live data.
+        raw = json.loads(places.CACHE_PATH.read_text())
+        raw["written_at"] = time.time() - (places.CACHE_MAX_AGE_SECONDS + 600)
+        places.CACHE_PATH.write_text(json.dumps(raw))
+        s.check("a stale cache is detected",
+                places.cache_age_seconds() > places.CACHE_MAX_AGE_SECONDS)
+        with FakeNet([overpass_ok(elements), overpass_ok([]), overpass_ok([])]) as net:
+            refreshed = places.search_places()
+        s.check("a stale cache triggers a live query", len(net.requests) > 0)
+        s.eq("and the live result is used", refreshed[0]["name"], "Live Place")
+
         # Overpass tries two endpoints per box and three boxes: six failures.
+        raw = json.loads(places.CACHE_PATH.read_text())
+        raw["written_at"] = time.time() - (places.CACHE_MAX_AGE_SECONDS + 600)
+        places.CACHE_PATH.write_text(json.dumps(raw))
         with FakeNet([url_error()] * 6, strict=False):
             cached = places.search_places()
-        s.eq("layer 2: Overpass down falls back to the cache", cached[0]["name"], "Live Place")
+        s.eq("layer 2: Overpass down falls back to even a stale cache",
+             cached[0]["name"], "Live Place")
         s.check("layer 2 rows are still callable", bool(cached[0]["phone"]))
 
         places.CACHE_PATH.unlink()

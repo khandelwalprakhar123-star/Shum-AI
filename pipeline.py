@@ -37,11 +37,34 @@ GEMINI_MODELS = env_list("GEMINI_MODELS") or [
     "gemini-3-flash-preview",
     "gemini-3.1-flash-lite",
 ]
+# Verified present on OpenRouter's free tier, 12 Sep 2026, by querying
+# /api/v1/models and filtering to zero prompt AND completion pricing. The
+# previous defaults here were plausible-looking model names that 404'd, which
+# made the second vendor decorative -- exactly the failure this chain exists to
+# prevent. Override with OPENROUTER_MODELS if these age out too.
 OPENROUTER_MODELS = env_list("OPENROUTER_MODELS") or [
-    "meta-llama/llama-3.3-70b-instruct:free",
-    "qwen/qwen-2.5-72b-instruct:free",
+    "nvidia/nemotron-3.5-lightning:free",
+    "nex-agi/nex-n2.5-mini:free",
+    "thinkingmachines/inkling-small:free",
 ]
 GEMINI_HOST = "https://generativelanguage.googleapis.com/v1beta/models"
+
+# 2048 was not enough and failed in the worst possible way. On the real
+# extraction prompt, gemini-3.5-flash spent 1,962 of 2,048 tokens THINKING and
+# had 71 left for the answer: finishReason MAX_TOKENS, truncated JSON, and a
+# silent fall through to keyword extraction. The pipeline reported success
+# ("gemini ok via gemini-3.5-flash") and then served visibly worse output --
+# it missed the party size, the budget and the cuisine preference.
+#
+# Measured on the real prompt:
+#   2048, thinking auto -> MAX_TOKENS, 1962 thought tokens, invalid JSON
+#   8192, thinking auto -> STOP, 3243 thought tokens, valid but slow
+#   2048, thinkingBudget 0 -> STOP, 366 answer tokens, valid, ~4x faster
+#
+# So: thinking off, and a budget with real headroom for a 200-message history.
+# Extraction is a reading task, not a reasoning task; the thinking bought
+# nothing here except the bug.
+MAX_OUTPUT_TOKENS = 4096
 OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 TIMEOUT = 25
 
@@ -79,44 +102,81 @@ def _post_json(url: str, payload: dict, headers: dict) -> dict:
         return json.loads(resp.read().decode("utf-8"))
 
 
+def _gemini_payload(prompt: str, disable_thinking: bool) -> dict:
+    config = {
+        # Ask for JSON at the API level rather than begging in the prompt.
+        # Removes the whole class of "model wrapped it in ```json" failures.
+        "responseMimeType": "application/json",
+        "temperature": 0.2,
+        "maxOutputTokens": MAX_OUTPUT_TOKENS,
+    }
+    if disable_thinking:
+        config["thinkingConfig"] = {"thinkingBudget": 0}
+    return {"contents": [{"role": "user", "parts": [{"text": prompt}]}],
+            "generationConfig": config}
+
+
 def _call_gemini(prompt: str) -> str:
-    """Try each Gemini model in turn. Returns raw JSON text."""
+    """Try each Gemini model in turn. Returns raw JSON text.
+
+    Each model gets up to two attempts: once with thinking disabled, and if the
+    API rejects that config with a 400, once without it. Older and lighter
+    models in the chain may not accept thinkingConfig at all, and a 400 would
+    otherwise abort the entire chain over a config key rather than a real fault.
+    """
     key = env("GEMINI_API_KEY")
     if not key:
         raise ModelUnavailable("no GEMINI_API_KEY")
 
+    headers = {"x-goog-api-key": key}  # header, never ?key= in the URL
     last = "no models attempted"
+
     for model in GEMINI_MODELS:
-        payload = {
-            "contents": [{"role": "user", "parts": [{"text": prompt}]}],
-            "generationConfig": {
-                # Ask for JSON at the API level rather than begging in the
-                # prompt. Removes the whole class of "model wrapped it in
-                # ```json" parsing failures.
-                "responseMimeType": "application/json",
-                "temperature": 0.2,
-                "maxOutputTokens": 2048,
-            },
-        }
-        # The key goes in a header. Never ?key= in the URL: it leaks into
-        # proxy logs, shell history and anything that records a URL.
-        headers = {"x-goog-api-key": key}
-        try:
-            data = _post_json(f"{GEMINI_HOST}/{model}:generateContent", payload, headers)
-            parts = (data.get("candidates") or [{}])[0].get("content", {}).get("parts") or []
-            text = "".join(p.get("text", "") for p in parts).strip()
-            if text:
-                print(f"[pipeline] gemini ok via {model}")
-                return text
-            last = f"{model}: empty response"
-        except urllib.error.HTTPError as exc:
-            last = f"{model}: HTTP {exc.code}"
-            print(f"[pipeline] {last}")
-            if exc.code not in RETRY_STATUSES:
+        url = f"{GEMINI_HOST}/{model}:generateContent"
+
+        for disable_thinking in (True, False):
+            try:
+                data = _post_json(url, _gemini_payload(prompt, disable_thinking), headers)
+            except urllib.error.HTTPError as exc:
+                if exc.code == 400 and disable_thinking:
+                    last = f"{model}: rejected thinkingConfig, retrying without it"
+                    print(f"[pipeline] {last}")
+                    continue
+                last = f"{model}: HTTP {exc.code}"
+                print(f"[pipeline] {last}")
+                if exc.code not in RETRY_STATUSES:
+                    # Our request or key is wrong; the next model fails the
+                    # same way, so stop rather than burn three more calls.
+                    raise ModelUnavailable(f"gemini chain aborted ({last})") from exc
                 break
-        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
-            last = f"{model}: {type(exc).__name__}"
+            except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+                last = f"{model}: {type(exc).__name__}"
+                print(f"[pipeline] {last}")
+                break
+
+            candidate = (data.get("candidates") or [{}])[0]
+            finish = candidate.get("finishReason")
+            parts = (candidate.get("content") or {}).get("parts") or []
+            text = "".join(p.get("text", "") for p in parts).strip()
+
+            if finish == "MAX_TOKENS":
+                # Name it precisely. "no JSON found in model output" sent us
+                # looking at the parser for something that was a budget problem.
+                thoughts = (data.get("usageMetadata") or {}).get("thoughtsTokenCount", 0)
+                last = (f"{model}: truncated at MAX_TOKENS "
+                        f"({thoughts} tokens went to thinking) \u2014 raise MAX_OUTPUT_TOKENS")
+                print(f"[pipeline] {last}")
+                break
+
+            if text:
+                print(f"[pipeline] gemini ok via {model}"
+                      f"{'' if disable_thinking else ' (thinking enabled)'}")
+                return text
+
+            last = f"{model}: empty response (finishReason={finish})"
             print(f"[pipeline] {last}")
+            break
+
     raise ModelUnavailable(f"gemini chain exhausted ({last})")
 
 
@@ -155,24 +215,90 @@ def _call_openrouter(prompt: str) -> str:
 
 
 def _parse_json(text: str) -> dict:
-    """Salvage JSON from a model that ignored responseMimeType."""
+    """Get a dict out of a model response, tolerating the real ways they break.
+
+    The one that cost us a live demo: gemini-3.5-flash returns a complete,
+    correct JSON object and then appends a STRAY EXTRA CLOSING BRACE.
+    json.loads() rejects the whole thing with "Extra data: line 42 column 1",
+    and a greedy `\{.*\}` regex is no help either because it happily matches
+    through the stray brace to the last one in the string. Both salvage paths
+    failed, extraction fell through to the slower fallback vendor, and the only
+    symptom was a 53-second /decide.
+
+    raw_decode is the right tool: it parses the first complete JSON value and
+    simply stops, ignoring whatever trails it.
+    """
+    text = (text or "").strip()
+    if not text:
+        raise ValueError("empty model output")
+
+    decoder = json.JSONDecoder()
+
+    # 1. Clean JSON, the common case.
     try:
         parsed = json.loads(text)
         return parsed if isinstance(parsed, dict) else {"value": parsed}
     except json.JSONDecodeError:
         pass
+
+    # 2. Valid JSON with trailing junk — a stray brace, a closing fence, prose.
+    start = text.find("{")
+    if start >= 0:
+        try:
+            parsed, _ = decoder.raw_decode(text[start:])
+            if isinstance(parsed, dict):
+                return parsed
+        except json.JSONDecodeError:
+            pass
+
+    # 3. A ```json fence, with the same trailing-junk tolerance inside it.
     fenced = re.search(r"```(?:json)?\s*(.+?)```", text, re.S)
     if fenced:
-        try:
-            return json.loads(fenced.group(1).strip())
-        except json.JSONDecodeError:
-            pass
-    brace = re.search(r"\{.*\}", text, re.S)
-    if brace:
-        try:
-            return json.loads(brace.group(0))
-        except json.JSONDecodeError:
-            pass
+        body = fenced.group(1).strip()
+        inner = body.find("{")
+        if inner >= 0:
+            try:
+                parsed, _ = decoder.raw_decode(body[inner:])
+                if isinstance(parsed, dict):
+                    return parsed
+            except json.JSONDecodeError:
+                pass
+
+    # 4. Last resort: walk braces to find a balanced object. Handles a leading
+    #    fragment followed by a good object, which raw_decode from the FIRST
+    #    brace would choke on.
+    depth = 0
+    opened = -1
+    in_string = False
+    escaped = False
+    for index, char in enumerate(text):
+        if in_string:
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == '"':
+                in_string = False
+            continue
+        if char == '"':
+            in_string = True
+        elif char == "{":
+            if depth == 0:
+                opened = index
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0 and opened >= 0:
+                try:
+                    parsed = json.loads(text[opened:index + 1])
+                    if isinstance(parsed, dict):
+                        return parsed
+                except json.JSONDecodeError:
+                    pass
+                opened = -1
+            if depth < 0:
+                depth = 0
+
     raise ValueError("no JSON found in model output")
 
 

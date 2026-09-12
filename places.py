@@ -27,13 +27,23 @@ from __future__ import annotations
 
 import json
 import re
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from pathlib import Path
 
+from envlite import env
+
 ROOT = Path(__file__).resolve().parent
 CACHE_PATH = ROOT / "places_cache.json"
+
+# A fresh cache is preferred over a live query, and that is a demo decision as
+# much as a caching one. The live Overpass round trip measured 6-18 seconds
+# depending on load, and /decide is watched by six impatient people in a group
+# chat. A restaurant list twenty minutes old is not stale; eighteen seconds of
+# dead air is a worse product.
+CACHE_MAX_AGE_SECONDS = int(env("PLACES_CACHE_MAX_AGE") or 6 * 3600)
 
 OVERPASS_ENDPOINTS = [
     "https://overpass-api.de/api/interpreter",
@@ -301,20 +311,53 @@ def read_cache() -> list[dict]:
 def write_cache(rows: list[dict]) -> None:
     try:
         CACHE_PATH.write_text(
-            json.dumps({"places": rows, "count": len(rows)}, indent=1, ensure_ascii=False),
+            json.dumps({"places": rows, "count": len(rows), "written_at": time.time()},
+                       indent=1, ensure_ascii=False),
             encoding="utf-8",
         )
     except OSError as exc:
         print(f"[places] could not write cache: {exc}")
 
 
+def cache_age_seconds() -> float | None:
+    """Seconds since the cache was written, or None if there isn't one."""
+    if not CACHE_PATH.exists():
+        return None
+    try:
+        data = json.loads(CACHE_PATH.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return None
+    written = data.get("written_at") if isinstance(data, dict) else None
+    if isinstance(written, (int, float)):
+        return max(0.0, time.time() - written)
+    try:
+        return max(0.0, time.time() - CACHE_PATH.stat().st_mtime)
+    except OSError:
+        return None
+
+
 # ---------------------------------------------------------------------------
 # Public entry point
 # ---------------------------------------------------------------------------
 
-def search_places(areas: list[str] | None = None, limit: int = 60) -> list[dict]:
-    """Live Overpass, then cache, then seed. Always returns something callable."""
+def search_places(areas: list[str] | None = None, limit: int = 60,
+                  force_live: bool = False) -> list[dict]:
+    """Fresh cache, else live Overpass, else stale cache, else the seed names.
+
+    Always returns something. The only layer that can return rows with no phone
+    number is the last one, and it says so.
+    """
     wanted = [a for a in (areas or list(AREAS)) if a in AREAS] or list(AREAS)
+
+    if not force_live:
+        age = cache_age_seconds()
+        if age is not None and age < CACHE_MAX_AGE_SECONDS:
+            cached = read_cache()
+            if cached:
+                callable_count = sum(1 for r in cached if r.get("phone"))
+                print(f"[places] cache hit ({age / 60:.0f} min old): "
+                      f"{len(cached)} places, {callable_count} callable")
+                return dedupe_and_rank(cached)[:limit]
 
     rows: list[dict] = []
     for key in wanted[:3]:  # three boxes is the most that finishes in time
@@ -332,7 +375,9 @@ def search_places(areas: list[str] | None = None, limit: int = 60) -> list[dict]
 
     cached = read_cache()
     if cached:
-        print(f"[places] overpass down — using cache ({len(cached)} places)")
+        age = cache_age_seconds()
+        stamp = f", {age / 3600:.1f}h old" if age else ""
+        print(f"[places] overpass down — using cache ({len(cached)} places{stamp})")
         return dedupe_and_rank(cached)[:limit]
 
     print(f"[places] overpass down AND cache empty — seed list only "
