@@ -26,6 +26,7 @@ Three layers, so this module cannot be the reason the demo fails:
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 import urllib.error
@@ -157,6 +158,59 @@ def normalise_phone(raw: str | None) -> str | None:
     return "+852" + digits
 
 
+# Centre of each district, from the boxes above. Good enough for "which of
+# these is least unfair to everybody" -- the error is a few hundred metres and
+# the question is which side of a harbour to eat on.
+DISTRICT_CENTRES: dict[str, tuple[float, float]] = {
+    name: ((south + north) / 2.0, (west + east) / 2.0)
+    for name, south, west, north, east in DISTRICTS
+}
+
+# Where a group can actually converge: somewhere on the MTR spine, not a
+# residential pocket that happens to sit at the geometric middle.
+MEETING_CANDIDATES = [
+    "Central", "Admiralty", "Wan Chai", "Causeway Bay", "Sheung Wan",
+    "Tsim Sha Tsui", "Jordan", "Mong Kok", "Yau Ma Tei", "North Point",
+    "Kowloon Tong", "Hung Hom",
+]
+
+
+def _km_between(a: tuple[float, float], b: tuple[float, float]) -> float:
+    """Great-circle distance. Straight-line, not travel time.
+
+    Deliberately not a routing API: this only has to ORDER candidate districts,
+    and in Hong Kong straight-line distance across the harbour tracks the MTR
+    closely enough to pick a side. A real journey planner would be better and
+    is not worth a key, a quota and a failure mode for a tie-break.
+    """
+    lat1, lon1, lat2, lon2 = map(math.radians, (a[0], a[1], b[0], b[1]))
+    h = (math.sin((lat2 - lat1) / 2) ** 2
+         + math.cos(lat1) * math.cos(lat2) * math.sin((lon2 - lon1) / 2) ** 2)
+    return 2 * 6371.0 * math.asin(math.sqrt(h))
+
+
+def meeting_districts(origins: list[str], limit: int = 6) -> list[str]:
+    """Rank meeting points so the WORST journey is as short as possible.
+
+    Minimising the worst commute rather than the average is the whole point.
+    An average puts dinner next to whoever lives closest to town and quietly
+    hands the entire journey to the one person coming from Tuen Mun -- which is
+    exactly the grievance that makes these conversations drag for forty
+    messages. Fairness is the product here, not efficiency.
+    """
+    points = [DISTRICT_CENTRES[o] for o in origins if o in DISTRICT_CENTRES]
+    if not points:
+        return []
+
+    def cost(district: str) -> tuple[float, float]:
+        here = DISTRICT_CENTRES[district]
+        legs = [_km_between(here, p) for p in points]
+        return (max(legs), sum(legs) / len(legs))   # worst first, then average
+
+    ranked = sorted((d for d in MEETING_CANDIDATES if d in DISTRICT_CENTRES), key=cost)
+    return ranked[:limit]
+
+
 def mentioned_districts(constraints: dict) -> list[str]:
     """Every Hong Kong district the chat actually named, in the order found.
 
@@ -190,27 +244,65 @@ def mentioned_districts(constraints: dict) -> list[str]:
     return found
 
 
+def origin_districts(constraints: dict) -> list[str]:
+    """Districts people said they are travelling FROM."""
+    found: list[str] = []
+    for entry in constraints.get("coming_from") or []:
+        place = str((entry or {}).get("place") or "").strip().lower()
+        for district, _, _, _, _ in DISTRICTS:
+            if district.lower() == place and district not in found:
+                found.append(district)
+    return found
+
+
+def destination_districts(constraints: dict) -> list[str]:
+    """Districts the chat named as WHERE to eat, rather than where from.
+
+    The distinction matters and used to be missing. "I'm coming from Sha Tin"
+    and "let's eat in Sha Tin" both mentioned Sha Tin, and both were treated as
+    a place to search -- so a commuter got restaurants next to their own office,
+    the exact opposite of what they asked for.
+    """
+    origins = {d.lower() for d in origin_districts(constraints)}
+    return [d for d in mentioned_districts(constraints) if d.lower() not in origins]
+
+
 def areas_for(constraints: dict) -> list[str]:
     """Turn what the chat said into which bounding boxes to search.
 
-    With nothing to go on it falls back to the full list, which is the old
-    behaviour. With an origin named it searches that origin's area AND the
-    cross-harbour spine, because a commuter wants a fair meeting point rather
-    than dinner next to their office.
+    Three cases, in priority order:
+      a named destination  -> search there, they have decided
+      only origins named   -> search the fairest meeting points between them
+      nothing named        -> search everywhere, assume nothing
     """
-    wanted: list[str] = []
-    for district in mentioned_districts(constraints):
-        area = DISTRICT_TO_AREA.get(district)
-        if area and area not in wanted:
-            wanted.append(area)
+    def to_areas(districts: list[str]) -> list[str]:
+        out: list[str] = []
+        for district in districts:
+            area = DISTRICT_TO_AREA.get(district)
+            if area and area not in out:
+                out.append(area)
+        return out
 
-    if not wanted:
-        return list(AREAS)
+    destinations = destination_districts(constraints)
+    if destinations:
+        wanted = to_areas(destinations)
+        for area in SPINE_AREAS:
+            if area not in wanted:
+                wanted.append(area)
+        return wanted or list(AREAS)
 
-    for area in SPINE_AREAS:
-        if area not in wanted:
-            wanted.append(area)
-    return wanted
+    origins = origin_districts(constraints)
+    if origins:
+        # Search the fair middle AND each origin's own area, because sometimes
+        # the fairest answer really is near where someone starts.
+        wanted = to_areas(meeting_districts(origins)) + to_areas(origins)
+        deduped: list[str] = []
+        for area in wanted:
+            if area not in deduped:
+                deduped.append(area)
+        return deduped or list(AREAS)
+
+    return list(AREAS)
 
 
 def relevance_rank(rows: list[dict], constraints: dict) -> list[dict]:
@@ -223,7 +315,12 @@ def relevance_rank(rows: list[dict], constraints: dict) -> list[dict]:
     Phone-bearing still dominates. A perfectly located restaurant we cannot
     telephone is useless to this agent.
     """
-    districts = {d.lower() for d in mentioned_districts(constraints)}
+    destinations = {d.lower() for d in destination_districts(constraints)}
+    origins = origin_districts(constraints)
+    # When nobody named a destination, the fair middle between the origins IS
+    # the destination, so rank by it rather than by a fixed spine list.
+    fair = [d.lower() for d in meeting_districts(origins)] if origins else []
+    fair_rank = {name: index for index, name in enumerate(fair)}
     spine = {"central", "sheung wan", "wan chai", "causeway bay", "admiralty",
              "tsim sha tsui", "jordan", "mong kok", "yau ma tei"}
 
@@ -231,8 +328,9 @@ def relevance_rank(rows: list[dict], constraints: dict) -> list[dict]:
         area = str(row.get("area") or "").lower()
         return (
             bool(row.get("phone")),
-            area in districts,          # a district the chat actually named
-            area in spine,              # otherwise a fair meeting point
+            area in destinations,                       # they decided
+            -fair_rank.get(area, 99) if fair else 0,    # else: fairest first
+            area in spine,
             bool(row.get("cuisine")),
             bool(area),
         )

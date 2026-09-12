@@ -39,6 +39,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
+import invite  # noqa: E402
 import pipeline  # noqa: E402
 from envlite import env, env_flag, load_env, warn_if_tls_broken  # noqa: E402
 from tgtext import esc  # noqa: E402
@@ -305,6 +306,21 @@ def format_outcome(pending: dict, body: dict) -> str:
         # somebody is about to turn up at a restaurant on the strength of it.
         lines.append("\n<i>Fields above were read back off the transcript, not confirmed "
                      "by the agent's own call analysis \u2014 worth a glance before you rely on them.</i>")
+
+    if status in ("confirmed", "booked"):
+        # One link, everybody's own calendar. Telegram does not hand out member
+        # email addresses -- correctly -- so there is nobody to send an invite
+        # TO. A click-to-add link needs no addresses, no OAuth and no account,
+        # and works for people who are not on Google Calendar at all.
+        link = invite.calendar_url(pending, collected)
+        if link:
+            lines.append(f"\n\U0001f4c5 <a href=\"{esc(link)}\">Add to your calendar</a>"
+                         " \u2014 everyone tap it once.")
+        else:
+            # No clock time means no calendar entry. A dinner filed at a guessed
+            # hour is wrong in six pockets and nobody notices until they are late.
+            lines.append("\n<i>No calendar link: the exact time never got pinned down "
+                         "on the call, and a guessed one would be worse than none.</i>")
 
     if pending.get("demo_override"):
         lines.append(

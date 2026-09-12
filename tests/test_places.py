@@ -262,8 +262,12 @@ def run() -> Suite:
         {"name": "NoPhone", "phone": None, "area": "Sha Tin", "cuisine": "Thai"},
     ]
     ranked = [r["name"] for r in places.relevance_rank(pool, sha_tin)]
-    s.eq("a named district ranks first", ranked[0], "Origin")
-    s.eq("then a fair meeting point", ranked[1], "Spine")
+    s.check("a commuter's OWN district does not win by default",
+            ranked.index("Origin") > 0,
+            "coming from Sha Tin is not a request to eat in Sha Tin")
+    s.eq("a place on the meeting spine wins instead", ranked[0], "Spine")
+    s.check("and somewhere far from everyone loses to it",
+            ranked.index("Spine") < ranked.index("Far"))
     s.eq("callable still beats well-located", ranked[-1], "NoPhone")
     s.eq("re-ranking never drops rows", len(places.relevance_rank(pool, silent)), len(pool))
 

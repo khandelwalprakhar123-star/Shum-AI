@@ -314,15 +314,45 @@ def handle_decide(tg: Telegram, chat_id: int, state: ChatState) -> None:
         # the pool against those districts, which matters because the cache is
         # territory-wide and constraint-blind by design. Nothing is assumed:
         # with no district mentioned, areas_for() returns everything.
+        # Merge remembered origins into today's constraints before searching.
+        # Dan told us he comes from Sha Tin three weeks ago; he should not have
+        # to say it again for the search to take it into account.
+        known_origins = {str((e or {}).get("place") or "").strip().lower()
+                         for e in (constraints.get("coming_from") or [])}
+        chat_people = (PEOPLE.get(str(chat_id)) or {})
+        for person in people.people_in(chat_people):
+            for area in person.get("areas") or []:
+                if area and area.lower() not in known_origins:
+                    constraints.setdefault("coming_from", []).append(
+                        {"who": person.get("name", ""), "place": area, "from_memory": True}
+                    )
+                    known_origins.add(area.lower())
+
+        # Remembered origins count too. Dan said he commutes from Sha Tin
+        # three weeks ago; he should not have to repeat it for the search to
+        # take it into account. This is the memory paying off in the SEARCH,
+        # not only in the constraint list.
+        seen_origins = {str((e or {}).get("place") or "").strip().lower()
+                        for e in (constraints.get("coming_from") or [])}
+        for person in people.people_in(PEOPLE.get(str(chat_id)) or {}):
+            for area in person.get("areas") or []:
+                if area and area.lower() not in seen_origins:
+                    constraints.setdefault("coming_from", []).append(
+                        {"who": person.get("name", ""), "place": area, "from_memory": True})
+                    seen_origins.add(area.lower())
+
         wanted_areas = places.areas_for(constraints)
         osm_rows = places.search_places(areas=wanted_areas)
         exa_rows = exa_search.search(constraints)
         candidates = places.relevance_rank(
             exa_search.merge(osm_rows, exa_rows), constraints
         )
-        named = places.mentioned_districts(constraints)
-        if named:
-            print(f"[bot] districts from the chat: {esc_join(named)} -> areas {wanted_areas}")
+        origins = places.origin_districts(constraints)
+        destinations = places.destination_districts(constraints)
+        fair = places.meeting_districts(origins)[:3] if origins and not destinations else []
+        if origins or destinations:
+            print(f"[bot] origins={origins} destinations={destinations} "
+                  f"fair={fair} -> areas {wanted_areas}")
         if not candidates:
             tg.send(chat_id, "I couldn't find any candidate restaurants at all. Search layers are all down.")
             return
@@ -348,9 +378,16 @@ def handle_decide(tg: Telegram, chat_id: int, state: ChatState) -> None:
         if proposal.get("tradeoff_line"):
             lines.append(f"\n<i>{esc(proposal['tradeoff_line'])}</i>")
         callable_n = sum(1 for c in candidates if c.get("phone"))
+        if destinations:
+            where = " \u00b7 searched in " + esc_join(destinations)
+        elif fair:
+            where = (" \u00b7 nobody picked a spot, so I looked around "
+                     + esc_join(fair) + " \u2014 fairest between " + esc_join(origins))
+        else:
+            where = ""
         lines.append(
-            f"\n<i>from {len(candidates)} candidates, {callable_n} with a dialable number "
-            f"· picks via {proposal.get('source', '?')}</i>"
+            f"\n<i>from {len(candidates)} candidates, {callable_n} with a dialable number"
+            f"{where} \u00b7 picks via {esc(proposal.get('source', '?'))}</i>"
         )
         tg.send(chat_id, "\n".join(lines))
 

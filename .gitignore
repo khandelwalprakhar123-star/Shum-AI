@@ -32,3 +32,6 @@ chat_state.json
 chat_state.json.tmp
 people.json
 people.json.tmp
+
+# Debris from a test run that died before its cleanup ran.
+tests/_test_*
