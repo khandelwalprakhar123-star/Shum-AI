@@ -129,6 +129,12 @@ Stdlib only. Nothing to install.
 python3 places.py --refresh-cache
 ```
 
+**If you are on macOS with Python from python.org, run this once:**
+```bash
+open "/Applications/Python 3.14/Install Certificates.command"
+```
+That installer does not wire Python into the system keychain — it expects a `cert.pem` it never creates. The symptom is vicious: `curl https://...` works perfectly while *every* `urllib` call in the same shell dies with `CERTIFICATE_VERIFY_FAILED`. Since every network call here goes through `urllib`, nothing works at all, and the error points at certificates rather than the one-line fix. Both `bot.py` and `bridge/server.py` now check the trust store at startup and print the exact command if it's empty.
+
 **Run, in two terminals:**
 ```bash
 python3 bridge/server.py      # then open http://localhost:8080/

@@ -37,7 +37,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
-from envlite import env, load_env  # noqa: E402
+from envlite import env, load_env, warn_if_tls_broken  # noqa: E402
 
 PENDING_PATH = HERE / "pending_call.json"
 CALL_LOG_DIR = ROOT / "call_log"
@@ -281,6 +281,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main() -> None:
     load_env(ROOT / ".env")
+    warn_if_tls_broken("bridge")
     if not env("ELEVENLABS_AGENT_ID"):
         print("[bridge] WARNING: ELEVENLABS_AGENT_ID is empty — the call page will refuse to start.")
     print(f"[bridge] listening on http://localhost:{PORT}")

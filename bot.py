@@ -41,7 +41,7 @@ sys.path.insert(0, str(ROOT))
 import exa_search
 import places
 import pipeline
-from envlite import env, env_flag, env_list, load_env
+from envlite import env, env_flag, env_list, load_env, warn_if_tls_broken
 
 PENDING_PATH = ROOT / "bridge" / "pending_call.json"
 BRIDGE_BASE = "http://127.0.0.1:8080"
@@ -548,6 +548,7 @@ def drain_backlog(tg: Telegram) -> int:
 
 def main() -> None:
     load_env(ROOT / ".env")
+    warn_if_tls_broken("bot")
     tg = Telegram(env("TELEGRAM_TOKEN"))
 
     me = tg.call("getMe", timeout=15)
