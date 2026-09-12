@@ -1,0 +1,588 @@
+#!/usr/bin/env python3
+"""bot.py — the coordinator. Lives in the group chat, because that is the only
+place the information exists.
+
+This is not a restaurant recommender. Recommendation is solved and nobody in
+Hong Kong is short of suggestions. What fails, every single week, is
+CONVERGENCE: six people, forty messages, nobody commits, and at 19:40 somebody
+says "just pick anything".
+
+Two primitives a group chat does not have, and this bot adds:
+
+  1. Memory of what was already agreed. Priya can't do pork. Marcus is coming
+     in from Sha Tin so Central is a fight. Hotpot was vetoed twice this month.
+     The budget conversation happened in July. None of that would ever be typed
+     into a booking form — it exists only in the chat, which is exactly why the
+     agent has to live in the chat.
+  2. A closing mechanism. A poll with a deadline and a default, so the decision
+     gets made rather than deferred.
+
+Standard library only, deliberately. No python-telegram-bot, no aiohttp, no
+pip install on conference wifi ten minutes before demos.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
+import uuid
+from collections import deque
+from datetime import datetime, timezone
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parent
+sys.path.insert(0, str(ROOT))
+
+import exa_search
+import places
+import pipeline
+from envlite import env, env_flag, env_list, load_env
+
+PENDING_PATH = ROOT / "bridge" / "pending_call.json"
+BRIDGE_BASE = "http://127.0.0.1:8080"
+API_TIMEOUT = 40
+HISTORY_LIMIT = 200
+NONE_OPTION = "None of these — keep arguing"
+
+
+# ===========================================================================
+# Telegram transport
+# ===========================================================================
+
+class Telegram:
+    def __init__(self, token: str):
+        if not token:
+            raise SystemExit(
+                "TELEGRAM_TOKEN is empty. Get one from BotFather, then — and this is the\n"
+                "step everyone forgets — send BotFather /setprivacy and choose DISABLE.\n"
+                "Without it the bot cannot see group messages at all and nothing works."
+            )
+        self.base = f"https://api.telegram.org/bot{token}"
+
+    def call(self, method: str, timeout: int | None = None, **params):
+        clean = {}
+        for key, value in params.items():
+            if value is None:
+                continue
+            clean[key] = json.dumps(value, ensure_ascii=False) if isinstance(value, (dict, list)) else value
+        body = urllib.parse.urlencode(clean).encode()
+        try:
+            req = urllib.request.Request(f"{self.base}/{method}", data=body)
+            with urllib.request.urlopen(req, timeout=timeout or API_TIMEOUT) as resp:
+                payload = json.loads(resp.read().decode("utf-8"))
+            return payload.get("result") if payload.get("ok") else None
+        except urllib.error.HTTPError as exc:
+            detail = ""
+            try:
+                detail = json.loads(exc.read().decode("utf-8")).get("description", "")
+            except Exception:
+                pass
+            print(f"[bot] {method} HTTP {exc.code} {detail}")
+        except (urllib.error.URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+            print(f"[bot] {method} failed: {type(exc).__name__}")
+        return None
+
+    def send(self, chat_id, text: str, **extra):
+        return self.call("sendMessage", chat_id=chat_id, text=text,
+                         parse_mode="HTML", disable_web_page_preview=True, **extra)
+
+
+# ===========================================================================
+# Per-chat state
+# ===========================================================================
+
+class ChatState:
+    def __init__(self):
+        self.history: deque[str] = deque(maxlen=HISTORY_LIMIT)
+        self.poll_id: str | None = None
+        self.poll_message_id: int | None = None
+        self.poll_options: list[str] = []
+        self.votes: dict[int, int] = {}          # user_id -> option index
+        self.voter_names: dict[int, str] = {}
+        self.picks: list[dict] = []
+        self.constraints: dict = {}
+        self.deciding = False
+        self.approval_token: str | None = None
+        self.approval_payload: dict | None = None
+
+    def add(self, author: str, text: str) -> None:
+        """Store one message, splitting multi-line into separate history lines.
+
+        People paste several thoughts as one message:
+            "ok so
+             priya can't do pork
+             and marcus is coming from sha tin"
+        Each of those lines is its own constraint. Kept as a single blob, the
+        extractor reliably finds the first one and loses the rest.
+        """
+        for line in (text or "").splitlines():
+            trimmed = line.strip()
+            if trimmed:
+                self.history.append(f"{author}: {trimmed}")
+
+    def as_text(self) -> str:
+        return "\n".join(self.history)
+
+
+STATE: dict[int, ChatState] = {}
+
+
+def state_for(chat_id: int) -> ChatState:
+    if chat_id not in STATE:
+        STATE[chat_id] = ChatState()
+    return STATE[chat_id]
+
+
+# ===========================================================================
+# Safety rails (brief §9). These are not polish.
+# ===========================================================================
+
+def resolve_dial_target(real_phone: str | None) -> tuple[str | None, bool, str | None]:
+    """Decide what number actually gets dialled.
+
+    Returns (dial_number, demo_override, refusal_reason).
+
+    Order matters. DEMO_PHONE wins over everything: when it is set, every call
+    routes to a number the operator controls no matter which restaurant won the
+    poll. The poll still shows the real place and the approval card says out
+    loud that the phone which rings is ours.
+
+    With no DEMO_PHONE we are dialling a real business, so the consent
+    allowlist becomes the gate. A number nobody agreed to is refused here, at
+    the approval step, rather than trusted to operator discipline at 16:02.
+    """
+    demo = env("DEMO_PHONE")
+    if demo:
+        normalised = places.normalise_phone(demo) or demo
+        return normalised, True, None
+
+    if not real_phone:
+        return None, False, "I don't have a phone number for that place, so I can't call it."
+
+    allowlist = [places.normalise_phone(n) or n for n in env_list("CONSENTED_NUMBERS")]
+    if real_phone in allowlist:
+        return real_phone, False, None
+
+    if env_flag("ALLOW_ANY_NUMBER"):
+        print(f"[bot] WARNING: dialling {real_phone}, which is not on the consent allowlist.")
+        return real_phone, False, None
+
+    return None, False, (
+        f"<b>Refusing to call.</b> {real_phone} is not on the consent allowlist.\n\n"
+        "This agent only phones numbers that agreed in advance to receive a call from it. "
+        "Add the number to <code>CONSENTED_NUMBERS</code> in <code>.env</code>, or set "
+        "<code>DEMO_PHONE</code> to route the call to a phone you control."
+    )
+
+
+# ===========================================================================
+# /decide
+# ===========================================================================
+
+def handle_decide(tg: Telegram, chat_id: int, state: ChatState) -> None:
+    if state.deciding:
+        tg.send(chat_id, "Already working on it — give me a few seconds.")
+        return
+    if len(state.history) < 3:
+        tg.send(
+            chat_id,
+            "I've only seen <b>%d</b> message%s in here so far.\n\n"
+            "I can only read messages sent <i>after</i> I joined — Telegram doesn't give bots "
+            "the backlog. Argue a bit and run /decide again."
+            % (len(state.history), "" if len(state.history) == 1 else "s"),
+        )
+        return
+
+    state.deciding = True
+    try:
+        tg.send(chat_id, f"Reading the last <b>{len(state.history)}</b> lines…")
+
+        constraints = pipeline.extract_constraints(state.as_text())
+        state.constraints = constraints
+        tg.send(chat_id, pipeline.render_constraints(constraints))
+
+        osm_rows = places.search_places()
+        exa_rows = exa_search.search(constraints)
+        candidates = exa_search.merge(osm_rows, exa_rows)
+        if not candidates:
+            tg.send(chat_id, "I couldn't find any candidate restaurants at all. Search layers are all down.")
+            return
+
+        proposal = pipeline.propose(constraints, candidates)
+        picks = [p for p in proposal.get("picks", []) if p.get("name")][:3]
+        if not picks:
+            tg.send(chat_id, "I found places but couldn't narrow them to three. Try /decide again.")
+            return
+        state.picks = picks
+
+        lines = ["<b>Three that fit</b>"]
+        for index, pick in enumerate(picks, 1):
+            phone_note = "" if pick.get("phone") else "  ⚠️ no number — I can't call this one"
+            area = f" · {pick['area']}" if pick.get("area") else ""
+            lines.append(f"\n<b>{index}. {pick['name']}</b>{area}{phone_note}")
+            if pick.get("why"):
+                lines.append(f"    {pick['why']}")
+            if pick.get("satisfies"):
+                lines.append(f"    ✓ {', '.join(pick['satisfies'][:3])}")
+            if pick.get("fails"):
+                lines.append(f"    ✗ {', '.join(pick['fails'][:2])}")
+        if proposal.get("tradeoff_line"):
+            lines.append(f"\n<i>{proposal['tradeoff_line']}</i>")
+        callable_n = sum(1 for c in candidates if c.get("phone"))
+        lines.append(
+            f"\n<i>from {len(candidates)} candidates, {callable_n} with a dialable number "
+            f"· picks via {proposal.get('source', '?')}</i>"
+        )
+        tg.send(chat_id, "\n".join(lines))
+
+        options = [p["name"][:95] for p in picks] + [NONE_OPTION]
+        poll = tg.call(
+            "sendPoll",
+            chat_id=chat_id,
+            question="Where are we eating?"[:295],
+            options=options,
+            # is_anonymous MUST be false. An anonymous poll delivers no
+            # poll_answer updates at all, so votes are invisible to the bot and
+            # /close has nothing to tally.
+            is_anonymous=False,
+            allows_multiple_answers=False,
+        )
+        if poll:
+            state.poll_id = (poll.get("poll") or {}).get("id")
+            state.poll_message_id = poll.get("message_id")
+            state.poll_options = options
+            state.votes = {}
+            state.voter_names = {}
+            tg.send(chat_id, "Vote above. <b>/close</b> when you're done and I'll take it from there.")
+        else:
+            tg.send(chat_id, "Couldn't post the poll. Reply with 1, 2 or 3 instead and use /close.")
+    finally:
+        state.deciding = False
+
+
+# ===========================================================================
+# /close
+# ===========================================================================
+
+def handle_close(tg: Telegram, chat_id: int, state: ChatState) -> None:
+    if not state.picks:
+        tg.send(chat_id, "Nothing to close — run /decide first.")
+        return
+
+    counts = [0] * len(state.poll_options or state.picks)
+
+    # stopPoll is the authoritative tally: Telegram's own per-option counts.
+    # Our poll_answer tracking is the fallback, and also the only way to know
+    # WHO voted, which the booking card shows.
+    if state.poll_message_id:
+        stopped = tg.call("stopPoll", chat_id=chat_id, message_id=state.poll_message_id)
+        if stopped:
+            for index, option in enumerate(stopped.get("options") or []):
+                if index < len(counts):
+                    counts[index] = option.get("voter_count", 0)
+    if not any(counts):
+        for option_index in state.votes.values():
+            if 0 <= option_index < len(counts):
+                counts[option_index] += 1
+
+    winner_index = max(range(len(counts)), key=lambda i: counts[i]) if any(counts) else 0
+    if any(counts) and state.poll_options and winner_index == len(state.poll_options) - 1:
+        tg.send(chat_id, "“None of these” won. Keep talking and run /decide again — "
+                         "I'll re-read the chat and try different places.")
+        state.poll_id = None
+        return
+
+    if not any(counts):
+        tg.send(chat_id, "<i>Nobody voted, so I'm taking the top pick by default. "
+                         "A group chat has no closing mechanism; this is the closing mechanism.</i>")
+
+    winner = state.picks[min(winner_index, len(state.picks) - 1)]
+    tally = " · ".join(
+        f"{state.picks[i]['name'][:18]} {counts[i]}" for i in range(min(len(state.picks), len(counts)))
+    )
+
+    dial_number, demo_override, refusal = resolve_dial_target(winner.get("phone"))
+    party = state.constraints.get("party_size") or 4
+    when_text = state.constraints.get("when_text") or "this evening"
+    hard_list = [h["constraint"] for h in state.constraints.get("hard", []) if h.get("constraint")]
+
+    if refusal:
+        tg.send(chat_id, f"\U0001f3c6 <b>{winner['name']}</b> wins.\n{tally}\n\n{refusal}")
+        return
+
+    token = uuid.uuid4().hex[:12]
+    state.approval_token = token
+    state.approval_payload = {
+        "id": token,
+        "created_at": datetime.now(timezone.utc).isoformat(),
+        "chat_id": chat_id,
+        "restaurant_name": winner["name"],
+        "restaurant_display": winner["name"],
+        "real_number": winner.get("phone"),
+        "dial_number": dial_number,
+        "demo_override": demo_override,
+        "party_size": party,
+        "when_text": when_text,
+        "booking_name": env("BOOKER_NAME", "a guest"),
+        "callback_number": env("CALLBACK_NUMBER"),
+        "constraints": hard_list,
+        "notes": winner.get("why", ""),
+        "area": winner.get("area", ""),
+        "vote_tally": tally,
+        "dial": False,
+        "status": "awaiting_approval",
+    }
+
+    card = [
+        f"\U0001f3c6 <b>{winner['name']}</b> wins.",
+        f"<i>{tally}</i>",
+        "",
+        "<b>I'm about to phone them.</b>",
+        f"• Dialling: <code>{dial_number}</code>",
+        f"• Party of {party}, {when_text}",
+        f"• Under the name {env('BOOKER_NAME', 'a guest')}",
+    ]
+    if hard_list:
+        card.append(f"• Mentioning: {', '.join(hard_list[:3])}")
+    card.append("")
+    if demo_override:
+        card.append(
+            "⚠️ <b>DEMO_PHONE is set.</b> The poll picked a real restaurant, but the "
+            "phone that actually rings is one we control. Nobody uninvited gets called."
+        )
+    else:
+        card.append(
+            "ℹ️ This is a <b>real call to a real venue that consented in advance</b>. "
+            "The agent says it is an AI in its first sentence. If it books a table, turn up or cancel."
+        )
+    card.append("\nA human presses the button, and a human dials the phone. I never call on my own.")
+
+    tg.send(
+        chat_id, "\n".join(card),
+        reply_markup={
+            "inline_keyboard": [[
+                {"text": "✅ Approve the call", "callback_data": f"ok:{token}"},
+                {"text": "❌ Cancel", "callback_data": f"no:{token}"},
+            ]]
+        },
+    )
+
+
+# ===========================================================================
+# Approval
+# ===========================================================================
+
+def notify_bridge_dial() -> bool:
+    try:
+        req = urllib.request.Request(
+            f"{BRIDGE_BASE}/dial", data=b"{}", method="POST",
+            headers={"Content-Type": "application/json"},
+        )
+        with urllib.request.urlopen(req, timeout=5) as resp:
+            return resp.status == 200
+    except (urllib.error.URLError, urllib.error.HTTPError, TimeoutError, OSError):
+        return False
+
+
+def handle_callback(tg: Telegram, query: dict) -> None:
+    data = query.get("data") or ""
+    message = query.get("message") or {}
+    chat_id = (message.get("chat") or {}).get("id")
+    who = (query.get("from") or {}).get("first_name", "someone")
+    if chat_id is None:
+        return
+    state = state_for(chat_id)
+
+    action, _, token = data.partition(":")
+    if not state.approval_token or token != state.approval_token:
+        tg.call("answerCallbackQuery", callback_query_id=query["id"],
+                text="That card is stale — run /close again.", show_alert=True)
+        return
+
+    if action == "no":
+        tg.call("answerCallbackQuery", callback_query_id=query["id"], text="Cancelled.")
+        state.approval_token = None
+        state.approval_payload = None
+        PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+        PENDING_PATH.write_text(json.dumps({"status": "cancelled"}, indent=2), encoding="utf-8")
+        tg.send(chat_id, f"❌ {who} cancelled. Nothing was dialled.")
+        return
+
+    if action != "ok":
+        return
+
+    payload = dict(state.approval_payload or {})
+    payload["approved_by"] = who
+    payload["approved_at"] = datetime.now(timezone.utc).isoformat()
+    payload["status"] = "approved"
+    payload["dial"] = False
+
+    PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
+    PENDING_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    tg.call("answerCallbackQuery", callback_query_id=query["id"], text="Approved — handing to the call desk.")
+    state.approval_token = None
+
+    if notify_bridge_dial():
+        tg.send(chat_id,
+                f"✅ {who} approved it. The call desk is dialling "
+                f"<code>{payload['dial_number']}</code> now — I'll post the transcript here.")
+    else:
+        payload["dial"] = True
+        PENDING_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
+        tg.send(chat_id,
+                f"✅ {who} approved it, and the booking is queued for "
+                f"<code>{payload['dial_number']}</code>.\n\n"
+                "<i>The call desk isn't answering on :8080 though. Start it with "
+                "<code>python3 bridge/server.py</code> and open "
+                "<code>http://localhost:8080/</code> — it'll pick this up automatically.</i>")
+
+
+# ===========================================================================
+# Update routing
+# ===========================================================================
+
+HELP = (
+    "<b>Dinner Bot</b>\n\n"
+    "I read this chat, pull out the constraints you've already agreed on, find three places "
+    "that fit, run a poll — and once one of you approves, I <b>phone the restaurant</b> "
+    "with a voice agent and book it.\n\n"
+    "/decide — read the chat and propose three\n"
+    "/close — close the poll, pick the winner, ask to call\n"
+    "/status — what I've read and what I know\n\n"
+    "<i>I can only see messages sent after I joined. Just talk normally; I'm reading.</i>"
+)
+
+
+def handle_message(tg: Telegram, message: dict) -> None:
+    chat = message.get("chat") or {}
+    chat_id = chat.get("id")
+    if chat_id is None:
+        return
+    state = state_for(chat_id)
+    author = (message.get("from") or {}).get("first_name") or "someone"
+    text = message.get("text") or message.get("caption") or ""
+
+    if not text:
+        return
+
+    command = re.match(r"^/([a-z_]+)(?:@\w+)?\b", text.strip(), re.I)
+    if not command:
+        state.add(author, text)
+        return
+
+    verb = command.group(1).lower()
+    if verb in ("start", "help"):
+        tg.send(chat_id, HELP)
+    elif verb == "decide":
+        handle_decide(tg, chat_id, state)
+    elif verb == "close":
+        handle_close(tg, chat_id, state)
+    elif verb == "status":
+        constraint_count = len(state.constraints.get("hard", [])) + len(state.constraints.get("vetoed", []))
+        tg.send(
+            chat_id,
+            f"<b>Status</b>\n"
+            f"• {len(state.history)} lines of history (cap {HISTORY_LIMIT})\n"
+            f"• {constraint_count} constraints from the last /decide\n"
+            f"• {len(state.picks)} picks on the table\n"
+            f"• poll open: {'yes' if state.poll_id else 'no'}\n"
+            f"• DEMO_PHONE: {'set — all calls route to it' if env('DEMO_PHONE') else 'not set — real calls'}\n"
+            f"• chat id: <code>{chat_id}</code>",
+        )
+    else:
+        state.add(author, text)
+
+
+def handle_poll_answer(answer: dict) -> None:
+    poll_id = answer.get("poll_id")
+    user = answer.get("user") or {}
+    chosen = answer.get("option_ids") or []
+    for state in STATE.values():
+        if state.poll_id == poll_id:
+            if chosen:
+                state.votes[user.get("id")] = chosen[0]
+                state.voter_names[user.get("id")] = user.get("first_name", "?")
+            else:
+                state.votes.pop(user.get("id"), None)   # retracted vote
+            return
+
+
+ALLOWED = ["message", "poll_answer", "callback_query"]
+
+
+def drain_backlog(tg: Telegram) -> int:
+    """Absorb whatever getUpdates has queued, WITHOUT acting on any of it.
+
+    On boot Telegram hands over everything since the last acknowledged offset.
+    Replaying that means re-running a /decide from twenty minutes ago and
+    re-firing a button press that was already handled — which crashes the bot
+    before it has said hello. Messages go into history so context is not lost;
+    commands and callbacks are dropped on the floor.
+    """
+    offset = None
+    absorbed = 0
+    for _ in range(12):
+        batch = tg.call("getUpdates", offset=offset, timeout=0, limit=100,
+                        allowed_updates=ALLOWED) or []
+        if not batch:
+            break
+        for update in batch:
+            offset = update["update_id"] + 1
+            message = update.get("message")
+            if message and (message.get("text") or "") and not message["text"].strip().startswith("/"):
+                chat_id = (message.get("chat") or {}).get("id")
+                if chat_id is not None:
+                    state_for(chat_id).add(
+                        (message.get("from") or {}).get("first_name") or "someone", message["text"]
+                    )
+                    absorbed += 1
+    print(f"[bot] drained backlog: {absorbed} messages into history, 0 actions fired")
+    return offset or 0
+
+
+def main() -> None:
+    load_env(ROOT / ".env")
+    tg = Telegram(env("TELEGRAM_TOKEN"))
+
+    me = tg.call("getMe", timeout=15)
+    if not me:
+        raise SystemExit("getMe failed — the token is wrong, or there is no network.")
+    print(f"[bot] @{me.get('username')} online")
+    if env("DEMO_PHONE"):
+        print(f"[bot] SAFETY RAIL: DEMO_PHONE set, every call routes to {env('DEMO_PHONE')}")
+    else:
+        allow = env_list("CONSENTED_NUMBERS")
+        print(f"[bot] live calling enabled; consent allowlist has {len(allow)} number(s)")
+
+    offset = drain_backlog(tg)
+    print("[bot] live. /decide in a group to start.")
+
+    while True:
+        updates = tg.call("getUpdates", offset=offset, timeout=25, limit=50,
+                          allowed_updates=ALLOWED) or []
+        for update in updates:
+            offset = update["update_id"] + 1
+            try:
+                if "message" in update:
+                    handle_message(tg, update["message"])
+                elif "poll_answer" in update:
+                    handle_poll_answer(update["poll_answer"])
+                elif "callback_query" in update:
+                    handle_callback(tg, update["callback_query"])
+            except Exception as exc:  # one bad update must never kill the loop
+                print(f"[bot] error handling update {update.get('update_id')}: {type(exc).__name__}: {exc}")
+        if not updates:
+            time.sleep(0.4)
+
+
+if __name__ == "__main__":
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n[bot] stopped")

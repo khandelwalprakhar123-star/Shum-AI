@@ -1,0 +1,23 @@
+# Secrets — this file exists BEFORE the first commit, on purpose.
+# Brief §12: if a token is ever committed, BotFather /revoke and regenerate.
+.env
+.env.local
+*.key
+
+# Runtime state
+bridge/pending_call.json
+places_cache.json
+call_log/
+*.wav
+*.mp3
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node (console/, if it ever gets built)
+node_modules/
+.next/
+.DS_Store

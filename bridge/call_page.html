@@ -1,0 +1,377 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>Dinner Bot — call desk</title>
+<style>
+  :root {
+    --bg: #0b0d10; --panel: #14181d; --line: #232a32;
+    --ink: #e8edf2; --dim: #8b98a5; --accent: #6ee7a8;
+    --warn: #f5b545; --bad: #f06d6d;
+    --mono: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 24px 16px 48px; background: var(--bg); color: var(--ink);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  }
+  .wrap { max-width: 720px; margin: 0 auto; }
+  h1 { font-size: 19px; margin: 0 0 2px; letter-spacing: -0.01em; }
+  .sub { color: var(--dim); font-size: 13px; margin-bottom: 22px; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: 12px; padding: 18px; margin-bottom: 14px;
+  }
+  .card h2 {
+    font-size: 11px; text-transform: uppercase; letter-spacing: 0.09em;
+    color: var(--dim); margin: 0 0 12px; font-weight: 600;
+  }
+  /* ---- The microphone level meter. ----
+     This is the only diagnostic that matters for acoustic coupling. If this bar
+     does not move while the restaurant's voice comes out of the phone speaker,
+     coupling has failed and no amount of prompt tuning will fix it. Move the
+     phone, raise its volume, or take the laptop off mute. Everything else on
+     this page is cosmetic by comparison. */
+  .meter { height: 26px; background: #0a0c0f; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; position: relative; }
+  .meter > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, var(--accent), #38bdf8); transition: width 60ms linear; }
+  .meter > span { position: absolute; inset: 0; display: grid; place-items: center; font: 600 11px var(--mono); color: var(--ink); mix-blend-mode: difference; }
+  .peak { font: 12px var(--mono); color: var(--dim); margin-top: 8px; }
+  .grid { display: grid; grid-template-columns: 132px 1fr; gap: 8px 14px; font-size: 14px; }
+  .grid dt { color: var(--dim); }
+  .grid dd { margin: 0; font-variant-numeric: tabular-nums; }
+  .num { font-family: var(--mono); }
+  button {
+    font: 600 14px inherit; padding: 11px 20px; border-radius: 9px;
+    border: 1px solid var(--line); background: #1d242c; color: var(--ink); cursor: pointer;
+  }
+  button.go { background: var(--accent); color: #06110c; border-color: transparent; }
+  button.stop { background: #2a1a1a; color: var(--bad); border-color: #45282a; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .pill { display: inline-block; font: 600 11px var(--mono); padding: 3px 9px; border-radius: 999px; border: 1px solid var(--line); color: var(--dim); }
+  .pill.on { color: #06110c; background: var(--accent); border-color: transparent; }
+  .pill.warn { color: #1a1205; background: var(--warn); border-color: transparent; }
+  .pill.bad { color: #fff; background: var(--bad); border-color: transparent; }
+  #log { font: 12.5px/1.55 var(--mono); max-height: 300px; overflow-y: auto; white-space: pre-wrap; }
+  #log div { padding: 4px 0; border-bottom: 1px solid #1a1f26; }
+  #log .ai { color: var(--accent); }
+  #log .them { color: #7dd3fc; }
+  #log .sys { color: var(--dim); }
+  #log .err { color: var(--bad); }
+  .rail { border-left: 3px solid var(--warn); padding-left: 12px; color: var(--warn); font-size: 13px; }
+  .script { font-size: 13px; color: var(--dim); }
+  .script b { color: var(--ink); }
+  @media (max-width: 480px) { .grid { grid-template-columns: 1fr; gap: 2px 0; } .grid dt { margin-top: 8px; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>Dinner Bot — call desk</h1>
+  <div class="sub">The agent runs in this tab over WebRTC and talks through your laptop's speakers and microphone. You dial; it speaks.</div>
+
+  <div class="card">
+    <h2>Microphone level — watch this, not the transcript</h2>
+    <div class="meter"><i id="bar"></i><span id="barTxt">idle</span></div>
+    <div class="peak" id="peak">peak 0.00 · no stream</div>
+  </div>
+
+  <div class="card">
+    <h2>Booking</h2>
+    <dl class="grid" id="booking">
+      <dt>Status</dt><dd><span class="pill" id="stPill">waiting for approval</span></dd>
+      <dt>Restaurant</dt><dd id="bName">—</dd>
+      <dt>Dialling</dt><dd class="num" id="bNumber">—</dd>
+      <dt>Party</dt><dd class="num" id="bParty">—</dd>
+      <dt>When</dt><dd id="bWhen">—</dd>
+      <dt>Under name</dt><dd id="bBooker">—</dd>
+      <dt>Callback</dt><dd class="num" id="bCallback">—</dd>
+      <dt>Constraints</dt><dd id="bConstraints">—</dd>
+    </dl>
+    <div id="railNote" style="margin-top:14px" hidden></div>
+  </div>
+
+  <div class="card">
+    <h2>Run the call</h2>
+    <p class="script">
+      <b>1.</b> Press <b>Arm microphone</b> and allow the prompt. <b>2.</b> Dial the number above on your
+      phone. <b>3.</b> Put the phone on <b>speakerphone</b>, face-down-up beside the laptop mic.
+      <b>4.</b> When a human answers, press <b>Start agent</b>. It discloses that it is an AI in its
+      first sentence.
+    </p>
+    <div class="row" style="margin-top:14px">
+      <button id="armBtn">Arm microphone</button>
+      <button id="startBtn" class="go" disabled>Start agent</button>
+      <button id="endBtn" class="stop" disabled>End call</button>
+      <span class="pill" id="connPill">disconnected</span>
+      <span class="pill" id="modePill">—</span>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Transcript</h2>
+    <div id="log"><div class="sys">nothing yet</div></div>
+  </div>
+</div>
+
+<script type="module">
+import { Conversation } from "https://cdn.jsdelivr.net/npm/@elevenlabs/client/+esm";
+
+const $ = (id) => document.getElementById(id);
+const state = {
+  cfg: null, pending: null, conv: null, transcript: [],
+  armed: false, running: false, startedFor: null,
+};
+
+function log(kind, text) {
+  const box = $("log");
+  if (box.firstElementChild?.classList.contains("sys") && box.children.length === 1
+      && box.firstElementChild.textContent === "nothing yet") box.innerHTML = "";
+  const row = document.createElement("div");
+  row.className = kind;
+  const t = new Date().toLocaleTimeString([], { hour12: false });
+  row.textContent = `${t}  ${text}`;
+  box.appendChild(row);
+  box.scrollTop = box.scrollHeight;
+}
+const pill = (el, text, cls = "") => { el.textContent = text; el.className = "pill " + cls; };
+
+// ------------------------------------------------------------------
+// Microphone metering
+// ------------------------------------------------------------------
+// getUserMedia hangs FOREVER if the permission prompt is dismissed rather than
+// answered — no error, no rejection, the page just sits there looking fine
+// (gotcha 13). So: check the permission state first to give an honest message,
+// and race the call against a timeout so a dismissed prompt surfaces as a
+// failure instead of a freeze.
+async function armMicrophone() {
+  try {
+    if (navigator.permissions?.query) {
+      const st = await navigator.permissions.query({ name: "microphone" });
+      log("sys", `microphone permission: ${st.state}`);
+      if (st.state === "denied") {
+        log("err", "Permission is denied at the browser level. Fix it in the padlock menu, then reload.");
+        pill($("connPill"), "mic denied", "bad");
+        return false;
+      }
+    }
+  } catch { /* Safari and some Chromium builds do not expose the mic descriptor */ }
+
+  let stream;
+  try {
+    stream = await Promise.race([
+      navigator.mediaDevices.getUserMedia({
+        audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+      }),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("timeout")), 9000)),
+    ]);
+  } catch (err) {
+    if (err.message === "timeout") {
+      log("err", "getUserMedia never resolved — the permission prompt was probably dismissed. Reload and press Allow.");
+    } else {
+      log("err", `getUserMedia failed: ${err.name} — ${err.message}`);
+    }
+    pill($("connPill"), "no mic", "bad");
+    return false;
+  }
+
+  const track = stream.getAudioTracks()[0];
+  log("sys", `input device: ${track?.label || "unknown"}`);
+
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const analyser = ctx.createAnalyser();
+  analyser.fftSize = 1024;
+  ctx.createMediaStreamSource(stream).connect(analyser);
+  const buf = new Float32Array(analyser.fftSize);
+  let peak = 0, everMoved = false;
+
+  (function tick() {
+    analyser.getFloatTimeDomainData(buf);
+    let sum = 0;
+    for (let i = 0; i < buf.length; i++) sum += buf[i] * buf[i];
+    const rms = Math.sqrt(sum / buf.length);
+    const pct = Math.min(100, rms * 420);
+    peak = Math.max(peak, rms);
+    if (rms > 0.02) everMoved = true;
+    $("bar").style.width = pct.toFixed(1) + "%";
+    $("barTxt").textContent = rms > 0.004 ? `${(rms * 100).toFixed(1)}` : "silence";
+    $("peak").textContent = `peak ${peak.toFixed(3)} · ${everMoved ? "coupling confirmed" : "no audio seen yet — talk into the phone"}`;
+    requestAnimationFrame(tick);
+  })();
+
+  state.armed = true;
+  $("armBtn").disabled = true;
+  $("startBtn").disabled = false;
+  pill($("connPill"), "mic live", "on");
+  log("sys", "Microphone armed. Speak into the phone's earpiece side and confirm the bar moves BEFORE you start the agent.");
+  return true;
+}
+
+// ------------------------------------------------------------------
+// The agent
+// ------------------------------------------------------------------
+async function startAgent() {
+  if (state.running) return;
+  if (!state.cfg?.agent_id) { log("err", "No ELEVENLABS_AGENT_ID in .env — the bridge served an empty agent id."); return; }
+  if (!state.armed) { log("err", "Arm the microphone first."); return; }
+
+  const p = state.pending || {};
+  state.transcript = [];
+  state.running = true;
+  state.startedFor = p.id || "manual";
+  $("startBtn").disabled = true;
+  $("endBtn").disabled = false;
+  pill($("connPill"), "connecting", "warn");
+
+  // Dynamic variables, not a rewritten prompt. The agent's own prompt stays
+  // fixed and reviewed — including its AI disclosure — and only the facts of
+  // this one booking change. That keeps the disclosure impossible to
+  // accidentally edit out from here.
+  const vars = {
+    restaurant_name: String(p.restaurant_display || p.restaurant_name || "your restaurant"),
+    party_size: String(p.party_size ?? 4),
+    when_text: String(p.when_text || "this evening"),
+    booking_name: String(p.booking_name || state.cfg.booker_name || "a guest"),
+    callback_number: String(p.callback_number || state.cfg.callback_number || ""),
+    constraints_text: (p.constraints || []).join("; ") || "no special requirements",
+    notes: String(p.notes || ""),
+  };
+  log("sys", `starting agent · ${vars.restaurant_name} · party ${vars.party_size} · ${vars.when_text}`);
+
+  try {
+    state.conv = await Conversation.startSession({
+      agentId: state.cfg.agent_id,
+      connectionType: "webrtc",   // WebRTC, not websocket: its echo cancellation
+                                  // and noise removal are exactly what a phone
+                                  // held next to a laptop mic needs.
+      dynamicVariables: vars,
+      onConnect: ({ conversationId }) => {
+        pill($("connPill"), "connected", "on");
+        log("sys", `connected · conversation ${conversationId || "?"}`);
+      },
+      onDisconnect: () => { pill($("connPill"), "disconnected"); finish("disconnected"); },
+      onError: (msg, ctx) => log("err", `agent error: ${msg} ${ctx ? JSON.stringify(ctx) : ""}`),
+      onModeChange: ({ mode }) => pill($("modePill"), mode === "speaking" ? "agent speaking" : "listening", mode === "speaking" ? "on" : ""),
+      onStatusChange: ({ status }) => log("sys", `status: ${status}`),
+      onMessage: ({ message, source }) => {
+        state.transcript.push({ source, message, at: new Date().toISOString() });
+        log(source === "user" ? "them" : "ai", `${source === "user" ? "restaurant" : "agent"}: ${message}`);
+      },
+    });
+  } catch (err) {
+    log("err", `could not start session: ${err?.message || err}`);
+    if (String(err?.message || "").match(/auth|signed|401|403/i)) {
+      log("err", "That looks like an auth failure: switch the agent's authentication setting OFF, or you must pass a signed URL.");
+    }
+    state.running = false;
+    $("startBtn").disabled = false;
+    $("endBtn").disabled = true;
+    pill($("connPill"), "failed", "bad");
+  }
+}
+
+async function endCall() {
+  if (state.conv) { try { await state.conv.endSession(); } catch { /* already gone */ } }
+  finish("ended by operator");
+}
+
+let finished = false;
+async function finish(reason) {
+  if (finished || !state.running) return;
+  finished = true;
+  state.running = false;
+  $("endBtn").disabled = true;
+  $("startBtn").disabled = !state.armed;
+  log("sys", `call finished (${reason}) · ${state.transcript.length} turns`);
+
+  try {
+    const res = await fetch("/outcome", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        status: reason,
+        transcript: state.transcript,
+        collected: state.collected || {},
+        turns: state.transcript.length,
+      }),
+    });
+    const out = await res.json();
+    log("sys", out.telegram_sent ? "result posted back to the group chat" : "result archived locally (Telegram post failed)");
+  } catch (err) {
+    log("err", `could not post outcome: ${err.message}`);
+  }
+  state.conv = null;
+  setTimeout(() => { finished = false; }, 1500);
+}
+
+// ------------------------------------------------------------------
+// Poll the bridge
+// ------------------------------------------------------------------
+function renderPending(p) {
+  const has = p && Object.keys(p).length > 0;
+  $("bName").textContent = has ? (p.restaurant_display || p.restaurant_name || "—") : "—";
+  $("bNumber").textContent = has ? (p.dial_number || "—") : "—";
+  $("bParty").textContent = has ? (p.party_size ?? "—") : "—";
+  $("bWhen").textContent = has ? (p.when_text || "—") : "—";
+  $("bBooker").textContent = has ? (p.booking_name || "—") : "—";
+  $("bCallback").textContent = has ? (p.callback_number || "—") : "—";
+  $("bConstraints").textContent = has && (p.constraints || []).length ? p.constraints.join(" · ") : "—";
+
+  const st = has ? (p.status || "pending") : "waiting for approval";
+  pill($("stPill"), st, st === "dialing" ? "on" : st === "done" ? "" : "warn");
+
+  const note = $("railNote");
+  if (has && p.demo_override) {
+    note.hidden = false;
+    note.className = "rail";
+    note.innerHTML = `<b>Safety rail active.</b> DEMO_PHONE is set, so this call goes to
+      <span class="num">${p.dial_number}</span> — a number you control — not to
+      ${p.real_number ? `<span class="num">${p.real_number}</span>, ` : ""}the restaurant.
+      The group chat was told this too.`;
+  } else if (has) {
+    note.hidden = false;
+    note.className = "rail";
+    note.innerHTML = `<b>Live call.</b> This dials a real venue that gave consent in advance.
+      The agent discloses it is an AI in its first sentence. If a table is booked, turn up or cancel it.`;
+  } else {
+    note.hidden = true;
+  }
+}
+
+async function poll() {
+  try {
+    const p = await (await fetch("/pending", { cache: "no-store" })).json();
+    state.pending = p;
+    renderPending(p);
+    // Auto-start once, on the transition to dial:true, and only if the
+    // operator already armed the mic. A human pressed approve in Telegram and a
+    // human dials the phone — this page never initiates anything on its own.
+    if (p?.dial && state.armed && !state.running && state.startedFor !== p.id) {
+      log("sys", "approval received from the group chat — starting");
+      startAgent();
+    }
+  } catch { /* bridge restarting; next tick will pick it up */ }
+}
+
+async function boot() {
+  try {
+    state.cfg = await (await fetch("/config", { cache: "no-store" })).json();
+    if (!state.cfg.agent_id_present) log("err", "ELEVENLABS_AGENT_ID is not set in .env.");
+    else log("sys", `bridge up · agent ${state.cfg.agent_id.slice(0, 10)}…`);
+  } catch {
+    log("err", "Cannot reach the bridge on :8080. Start it with  python3 bridge/server.py");
+  }
+  if (location.protocol === "file:") {
+    log("err", "This page is on file:// — getUserMedia will be refused. Open http://localhost:8080/ instead.");
+  }
+  poll();
+  setInterval(poll, 1200);
+}
+
+$("armBtn").addEventListener("click", armMicrophone);
+$("startBtn").addEventListener("click", startAgent);
+$("endBtn").addEventListener("click", endCall);
+boot();
+</script>
+</body>
+</html>
