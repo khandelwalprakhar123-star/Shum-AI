@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import sys
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -37,6 +38,7 @@ HERE = Path(__file__).resolve().parent
 ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
+import pipeline  # noqa: E402
 from envlite import env, load_env, warn_if_tls_broken  # noqa: E402
 
 PENDING_PATH = HERE / "pending_call.json"
@@ -101,6 +103,72 @@ def send_telegram(chat_id, text: str) -> bool:
         return False
 
 
+# --------------------------------------------------------------------------
+# Turning a call into a state transition
+# --------------------------------------------------------------------------
+# The ElevenLabs data-collection schema is evaluated server-side AFTER the call
+# finishes, and is NOT delivered to the browser session. So the page can report
+# what was said but not what it meant, and a `collected` field populated from
+# the browser would be permanently empty.
+#
+# Two sources, best first:
+#   1. the agent's own schema result, over the API (saw the audio)
+#   2. Gemini reading the transcript (sees only text — labelled as such)
+
+def _fetch_agent_analysis(conversation_id: str, api_key: str) -> dict:
+    """Ask ElevenLabs for the agent's own data-collection result.
+
+    The analysis is computed asynchronously once the call ends, so a request
+    made the instant the page hangs up usually arrives before the result does.
+    Three tries, four seconds apart, then give up quietly and let the
+    transcript path handle it.
+    """
+    url = f"https://api.elevenlabs.io/v1/convai/conversations/{conversation_id}"
+    for attempt in range(3):
+        if attempt:
+            time.sleep(4)
+        try:
+            req = urllib.request.Request(url, headers={"xi-api-key": api_key})
+            with urllib.request.urlopen(req, timeout=12) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+        except (urllib.error.HTTPError, urllib.error.URLError, OSError,
+                TimeoutError, json.JSONDecodeError) as exc:
+            print(f"[bridge] elevenlabs analysis attempt {attempt + 1}: {type(exc).__name__}")
+            continue
+
+        results = ((data.get("analysis") or {}).get("data_collection_results") or {})
+        if not results:
+            print(f"[bridge] analysis not ready yet (attempt {attempt + 1})")
+            continue
+
+        # Each entry is {"value": ..., "rationale": ...}; flatten to values.
+        flat = {}
+        for key, item in results.items():
+            flat[key] = item.get("value") if isinstance(item, dict) else item
+        if any(v not in (None, "") for v in flat.values()):
+            return flat
+    return {}
+
+
+def collect_outcome(body: dict) -> tuple[dict, str]:
+    """Return (structured_fields, source_label)."""
+    conversation_id = body.get("conversation_id")
+    api_key = env("ELEVENLABS_API_KEY")
+
+    if conversation_id and api_key:
+        agent_result = _fetch_agent_analysis(conversation_id, api_key)
+        if agent_result:
+            print("[bridge] outcome from the agent's own data-collection schema")
+            return agent_result, "agent schema"
+
+    derived = pipeline.extract_call_outcome(body.get("transcript") or [])
+    if derived:
+        print("[bridge] outcome derived from the transcript")
+        return derived, "transcript (derived)"
+
+    return {}, "none"
+
+
 def format_outcome(pending: dict, body: dict) -> str:
     """Turn the call into a chat message a human can act on.
 
@@ -109,7 +177,7 @@ def format_outcome(pending: dict, body: dict) -> str:
     the group chat can close its own loop.
     """
     collected = body.get("collected") or {}
-    status = (collected.get("status") or body.get("status") or "unknown").lower()
+    status = str(collected.get("status") or body.get("status") or "unknown").lower()
     name = pending.get("restaurant_display") or pending.get("restaurant_name") or "the restaurant"
 
     head = {
@@ -141,6 +209,14 @@ def format_outcome(pending: dict, body: dict) -> str:
             said = str(turn.get("message", "")).strip()
             if said:
                 lines.append(f"{who} {said}")
+
+    source = body.get("outcome_source")
+    if source == "transcript (derived)":
+        # Say where the structured fields came from. The agent's own schema saw
+        # the audio; this read only the words. That difference matters if
+        # somebody is about to turn up at a restaurant on the strength of it.
+        lines.append("\n<i>Fields above were read back off the transcript, not confirmed "
+                     "by the agent's own call analysis \u2014 worth a glance before you rely on them.</i>")
 
     if pending.get("demo_override"):
         lines.append(
@@ -255,17 +331,23 @@ class Handler(BaseHTTPRequestHandler):
 
         elif route == "/outcome":
             pending = read_pending()
+            collected, source = collect_outcome(body)
+            body["collected"] = collected
+            body["outcome_source"] = source
+
             archived = archive_call(pending, body)
             text = format_outcome(pending, body)
             sent = send_telegram(pending.get("chat_id"), text)
             patch_pending(
                 dial=False,
                 status="done",
-                outcome=body.get("collected") or {},
+                outcome=collected,
+                outcome_source=source,
                 finished_at=datetime.now(timezone.utc).isoformat(),
             )
             print(f"[bridge] call archived -> {archived}")
-            self._json({"ok": True, "telegram_sent": sent, "archived": archived.name})
+            self._json({"ok": True, "telegram_sent": sent,
+                        "archived": archived.name, "outcome_source": source})
 
         elif route == "/cancel":
             self._json(patch_pending(dial=False, status="cancelled"))

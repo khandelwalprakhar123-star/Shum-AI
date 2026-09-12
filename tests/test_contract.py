@@ -25,6 +25,8 @@ from harness import Suite
 BOT_SRC = (ROOT / "bot.py").read_text(encoding="utf-8")
 PAGE_SRC = (ROOT / "bridge" / "call_page.html").read_text(encoding="utf-8")
 SERVER_SRC = (ROOT / "bridge" / "server.py").read_text(encoding="utf-8")
+AGENT_DOC = (ROOT / "docs" / "elevenlabs-agent.md").read_text(encoding="utf-8")
+PREFLIGHT_SRC = (ROOT / "preflight.py").read_text(encoding="utf-8")
 
 
 def fields_bot_writes() -> set[str]:
@@ -114,4 +116,60 @@ def run() -> Suite:
     s.check(".env is gitignored", ".env" in (ROOT / ".gitignore").read_text())
     s.check("pending_call.json is gitignored",
             "pending_call.json" in (ROOT / ".gitignore").read_text())
+
+    # ---------------------------------------------------------------
+    # The agent-prompt contract.
+    # ---------------------------------------------------------------
+    # The prompt lives in the ElevenLabs dashboard, outside this repo, so it
+    # cannot be tested directly. What CAN be pinned is the documentation a
+    # human pastes from: every {{variable}} the doc tells you to write must be
+    # one the call page actually sends. A drift here is silent and expensive —
+    # the agent makes a fluent call that mentions no dietary constraint and no
+    # time, and sounds completely fine doing it.
+    block = PAGE_SRC[PAGE_SRC.index("const vars = {"):]
+    block = block[:block.index("};")]
+    page_vars = set(re.findall(r"^\s*([a-z_]+):", block, re.M))
+    doc_vars = set(re.findall(r"\{\{([a-z_]+)\}\}", AGENT_DOC))
+
+    s.check("the agent doc's variables were parsed", len(doc_vars) >= 5, f"found {doc_vars}")
+    s.check("the call page's dynamic variables were parsed", len(page_vars) >= 5, f"found {page_vars}")
+    s.check("every {{variable}} the doc uses is one the call page sends",
+            not (doc_vars - page_vars), f"doc uses but page never sends: {sorted(doc_vars - page_vars)}")
+    s.check("every variable the page sends is used by the documented prompt",
+            not (page_vars - doc_vars), f"sent but unused: {sorted(page_vars - doc_vars)}")
+    for var in ("restaurant_name", "party_size", "when_text", "booking_name", "constraints_text"):
+        s.check(f"the prompt reads {{{{{var}}}}}", "{{" + var + "}}" in AGENT_DOC)
+
+    # The data-collection schema spans three files and a dashboard.
+    doc_fields = set(re.findall(r"^\| `([a-z_]+)` \|", AGENT_DOC, re.M))
+    server_fields = set(re.findall(r'collected\.get\("([a-z_]+)"\)', SERVER_SRC))
+    s.check("the documented schema has six fields", len(doc_fields) == 6, f"found {sorted(doc_fields)}")
+    s.check("every schema field server.py reads is one the doc defines",
+            not (server_fields - doc_fields), f"undefined: {sorted(server_fields - doc_fields)}")
+    s.check("preflight checks the schema fields too",
+            "REQUIRED_SCHEMA_FIELDS" in PREFLIGHT_SRC)
+    # Read the real constant rather than scraping its source text: a regex over
+    # a multi-line set literal silently matched only the line-final entries and
+    # "passed" against two of six fields.
+    import preflight
+    s.eq("preflight and the doc agree on the schema exactly",
+         preflight.REQUIRED_SCHEMA_FIELDS, doc_fields)
+
+    # Safety invariants that live in the prompt rather than the code.
+    s.check("the documented first message discloses being an AI in its first sentence",
+            "I'm an AI assistant" in AGENT_DOC)
+    s.check("the prompt forbids implying it is a person",
+            "Never imply you are a person" in AGENT_DOC)
+    s.check("the prompt forbids inventing a phone number",
+            "Never invent a phone number" in AGENT_DOC)
+    s.check("the prompt tells it not to push after a refusal",
+            "do not push" in AGENT_DOC.lower())
+
+    # The outcome path must not read a field the page stopped sending.
+    s.check("server no longer trusts a browser-supplied 'collected' as the only source",
+            "collect_outcome" in SERVER_SRC)
+    s.check("the page sends the conversation id for the agent's own analysis",
+            "conversation_id" in PAGE_SRC and "conversationId" in PAGE_SRC)
+    s.check("a derived outcome is labelled as derived in the chat message",
+            "derived" in SERVER_SRC)
     return s

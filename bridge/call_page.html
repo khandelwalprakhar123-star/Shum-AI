@@ -120,7 +120,7 @@ import { Conversation } from "https://cdn.jsdelivr.net/npm/@elevenlabs/client/+e
 const $ = (id) => document.getElementById(id);
 const state = {
   cfg: null, pending: null, conv: null, transcript: [],
-  armed: false, running: false, startedFor: null,
+  armed: false, running: false, startedFor: null, conversationId: null,
 };
 
 function log(kind, text) {
@@ -246,6 +246,9 @@ async function startAgent() {
                                   // held next to a laptop mic needs.
       dynamicVariables: vars,
       onConnect: ({ conversationId }) => {
+        // Keep the id: it is how the bridge asks ElevenLabs for the agent's own
+        // data-collection result once the call has been analysed server-side.
+        state.conversationId = conversationId || null;
         pill($("connPill"), "connected", "on");
         log("sys", `connected · conversation ${conversationId || "?"}`);
       },
@@ -291,11 +294,12 @@ async function finish(reason) {
       body: JSON.stringify({
         status: reason,
         transcript: state.transcript,
-        collected: state.collected || {},
+        conversation_id: state.conversationId || null,
         turns: state.transcript.length,
       }),
     });
     const out = await res.json();
+    if (out.outcome_source) log("sys", `structured outcome via ${out.outcome_source}`);
     log("sys", out.telegram_sent ? "result posted back to the group chat" : "result archived locally (Telegram post failed)");
   } catch (err) {
     log("err", `could not post outcome: ${err.message}`);

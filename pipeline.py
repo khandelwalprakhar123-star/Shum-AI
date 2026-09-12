@@ -58,6 +58,7 @@ RETRY_STATUSES = {404, 408, 429, 500, 502, 503, 504}
 CHAT_SENTINEL = "@@CHAT_HISTORY@@"
 CANDIDATES_SENTINEL = "@@CANDIDATES@@"
 CONSTRAINTS_SENTINEL = "@@CONSTRAINTS@@"
+TRANSCRIPT_SENTINEL = "@@TRANSCRIPT@@"
 
 
 class ModelUnavailable(RuntimeError):
@@ -591,3 +592,78 @@ def render_constraints(constraints: dict) -> str:
         lines.append("<i>Nothing concrete yet — keep talking and run /decide again.</i>")
     lines.append(f"\n<i>via {constraints.get('source', '?')}</i>")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# 3. Reading the call outcome
+# ---------------------------------------------------------------------------
+
+OUTCOME_PROMPT = """You are reading a transcript of a phone call an AI assistant just made to a
+restaurant to book a table. Report only what the RESTAURANT STAFF actually confirmed.
+
+Rules:
+- If staff did not confirm a time, leave confirmed_time null. Do not copy the time that was requested.
+- status must be exactly one of: confirmed, waitlist, declined, no_answer, unclear
+- "declined" means they said no or are fully booked. "unclear" means the call ended ambiguously.
+- wait_estimate_minutes only if a wait was actually quoted.
+- Never invent a detail to make the call look successful.
+
+Return ONLY this JSON shape:
+{
+  "status": "unclear",
+  "confirmed_time": null,
+  "confirmed_party_size": null,
+  "wait_estimate_minutes": null,
+  "booking_name": null,
+  "staff_notes": ""
+}
+
+TRANSCRIPT:
+@@TRANSCRIPT@@
+"""
+
+_STATUSES = {"confirmed", "waitlist", "declined", "no_answer", "unclear"}
+
+
+def extract_call_outcome(transcript: list[dict]) -> dict:
+    """Turn a call transcript into the same structured shape the agent's
+    data-collection schema produces.
+
+    This exists because the ElevenLabs data-collection schema is evaluated
+    server-side AFTER the call and is not handed to the browser session. So the
+    browser can report what was said, but not what it meant. Rather than ship a
+    field that is always empty, the bridge asks for the schema result over the
+    API when an ElevenLabs key is present, and otherwise derives the same
+    fields here from the words that were actually spoken.
+
+    Deriving it is strictly second-best and labelled as such wherever it is
+    shown, because the agent's own evaluation saw the audio and this only sees
+    text. But a demo whose loop closes is worth more than a demo with an
+    architecturally purer empty dict.
+    """
+    turns = [t for t in (transcript or []) if str(t.get("message", "")).strip()]
+    if not turns:
+        return {}
+
+    lines = []
+    for turn in turns[-40:]:
+        who = "RESTAURANT" if turn.get("source") == "user" else "AGENT"
+        lines.append(f"{who}: {str(turn.get('message')).strip()}")
+
+    prompt = OUTCOME_PROMPT.replace(TRANSCRIPT_SENTINEL, "\n".join(lines)[-8000:])
+    try:
+        parsed, _ = _generate(prompt)
+    except ModelUnavailable:
+        return {}
+
+    status = str(parsed.get("status") or "unclear").strip().lower()
+    return {
+        "status": status if status in _STATUSES else "unclear",
+        "confirmed_time": (str(parsed["confirmed_time"]).strip()
+                           if parsed.get("confirmed_time") else None),
+        "confirmed_party_size": _clean_int(parsed.get("confirmed_party_size")),
+        "wait_estimate_minutes": _clean_int(parsed.get("wait_estimate_minutes"), 1, 600),
+        "booking_name": (str(parsed["booking_name"]).strip()
+                         if parsed.get("booking_name") else None),
+        "staff_notes": str(parsed.get("staff_notes") or "").strip()[:300],
+    }
