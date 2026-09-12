@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import bot
 import people
-from harness import Suite
+from harness import Suite, unescaped
 
 TMP_PENDING = Path(__file__).resolve().parent / "_test_pending.json"
 
@@ -62,8 +62,14 @@ SUITE_PEOPLE = Path(__file__).resolve().parent / "_test_suite_people.json"
 
 
 def run() -> Suite:
-    s = Suite("bot", expect_at_least=84)
+    s = Suite("bot", expect_at_least=94)
     bot.PENDING_PATH = TMP_PENDING
+    # notify_bridge_dial makes a real POST to localhost:8080. Stub it, and
+    # exercise both branches deliberately further down rather than letting a
+    # unit test decide whether a live bridge happens to be listening.
+    real_notify = bot.notify_bridge_dial
+    bridge_calls: list[bool] = []
+    bot.notify_bridge_dial = lambda: (bridge_calls.append(True), True)[1]
     # Redirect persistence for the entire suite. Without this, every handler
     # under test wrote into the project's real chat_state.json and the next
     # real bot start restored test chats as if they were a conversation.
@@ -445,6 +451,27 @@ def run() -> Suite:
             written["dial"] is True or "call desk" in tg.sent_text())
     s.eq("the token is single-use", st.approval_token, None)
 
+    s.check("approval notified the bridge through the stub, not the network",
+            bool(bridge_calls))
+
+    # The bridge being down must be handled, not silently swallowed.
+    bot.notify_bridge_dial = lambda: False
+    st = seeded_state(None)
+    st.constraints = {"party_size": 6, "when_text": "Friday 8pm", "hard": []}
+    tg = FakeTelegram({"stopPoll": {"options": [
+        {"voter_count": 0}, {"voter_count": 3}, {"voter_count": 0}, {"voter_count": 0}]}})
+    bot.handle_close(tg, -100, st)
+    down_token = st.approval_token
+    tg = FakeTelegram()
+    bot.handle_callback(tg, {"id": "cb", "data": f"ok:{down_token}",
+                             "from": {"first_name": "Dan"}, "message": {"chat": {"id": -100}}})
+    written_down = json.loads(TMP_PENDING.read_text())
+    s.eq("with the bridge down the booking is queued with dial already true",
+         written_down["dial"], True)
+    s.contains("and the chat is told how to start the call desk",
+               tg.sent_text(), "bridge/server.py")
+    bot.notify_bridge_dial = lambda: (bridge_calls.append(True), True)[1]
+
     tg = FakeTelegram()
     bot.handle_callback(tg, {"id": "cb", "data": "ok:stale-token",
                              "from": {"first_name": "Dan"}, "message": {"chat": {"id": -100}}})
@@ -458,6 +485,40 @@ def run() -> Suite:
                              "from": {"first_name": "Priya"}, "message": {"chat": {"id": -100}}})
     s.eq("cancelling clears the pending call", json.loads(TMP_PENDING.read_text())["status"], "cancelled")
     s.contains("and says nothing was dialled", tg.sent_text(), "Nothing was dialled")
+
+    # --- the booking card must survive a real restaurant name ------------
+    # OSM is full of "Fish & Chips" and "R&B Tea". If the card is the message
+    # Telegram refuses, the approve button never appears and the flow
+    # dead-ends mid-pitch with no error anywhere.
+    os.environ["CONSENTED_NUMBERS"] = "+85228519969"
+    os.environ["DEMO_PHONE"] = "+85291112222"
+    st = seeded_state(None)
+    st.picks = [{"name": "Fish & Chips <Central>", "phone": "+85228519969",
+                 "area": "Sheung Wan & Central", "why": "cheap & close",
+                 "satisfies": ["no pork & no beef"], "fails": ["a & b"],
+                 "website": "https://x.test/?a=1&b=2"}]
+    st.poll_options = ["Fish & Chips <Central>", bot.NONE_OPTION]
+    st.constraints = {"party_size": 2, "when_text": "2pm & later",
+                      "hard": [{"constraint": "no pork & no beef"}]}
+    tg = FakeTelegram({"stopPoll": {"options": [{"voter_count": 3}, {"voter_count": 0}]}})
+    bot.handle_close(tg, -100, st)
+    s.eq("the booking card survives an ampersand in the venue name",
+         unescaped(tg.sent_text()), [])
+    s.check("and the approve button is actually attached", any(
+        "inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg.calls))
+    s.contains("the name is still readable", tg.sent_text(), "Fish &amp; Chips")
+    os.environ.pop("DEMO_PHONE", None)
+
+    st = seeded_state(None)
+    st.constraints = {"hard": []}
+    tg = FakeTelegram({"stopPoll": {"options": [
+        {"voter_count": 0}, {"voter_count": 3}, {"voter_count": 0}, {"voter_count": 0}]}})
+    bot.handle_close(tg, -100, st)
+    s.eq("the follow-up question renders cleanly", unescaped(tg.sent_text()), [])
+    tg2 = FakeTelegram()
+    bot.try_answer(tg2, -100, st, "2 of us at 2pm & no later", "A & B")
+    s.eq("so does the acknowledgement, with an ampersand in the name",
+         unescaped(tg2.sent_text()), [])
 
     # --- a booking link is a real answer, not a shrug ---------------------
     os.environ["CONSENTED_NUMBERS"] = "+85228519969"
@@ -566,6 +627,7 @@ def run() -> Suite:
         SUITE_PEOPLE.unlink()
     people.PEOPLE_PATH = real_people_path
     bot.PEOPLE = {}
+    bot.notify_bridge_dial = real_notify
     bot.STATE_PATH = real_state_path
     bot.STATE.clear()
     for key in ("DEMO_PHONE", "CONSENTED_NUMBERS", "ALLOW_ANY_NUMBER"):

@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import io
 import json
+import re
 import traceback
 import urllib.error
 import urllib.request
@@ -102,6 +103,36 @@ def overpass_ok(elements):
 # ---------------------------------------------------------------------------
 # The network kill switch
 # ---------------------------------------------------------------------------
+# FakeNet only guards code that runs INSIDE its context. That was not enough.
+#
+# bot.notify_bridge_dial() builds its own urllib request, and its caller
+# swallows connection errors -- so with bridge/server.py running and a booking
+# queued, `python3 tests/run.py` POSTed to the real http://127.0.0.1:8080/dial
+# and flipped the live pending_call.json to dial:true. The call page
+# auto-starts the agent on exactly that transition.
+#
+# A test run placing a phone call with nobody pressing anything violates brief
+# section 9.2, and it happened while the runner printed "network fully mocked".
+# Proven from this machine's bridge log: two POST /dial 409 entries with no
+# human involved; they were 409 only because nothing was queued at the time.
+#
+# So the default is now a hard failure. Anything reaching the network outside a
+# FakeNet raises instead of quietly succeeding.
+
+_REAL_URLOPEN = urllib.request.urlopen
+
+
+def _forbidden_urlopen(request, *args, **kwargs):
+    url = getattr(request, "full_url", str(request))
+    raise AssertionError(
+        f"NETWORK CALL OUTSIDE FakeNet: {url}\n"
+        "This suite's central claim is that the network is fully mocked. A call "
+        "that escapes FakeNet can reach the live bridge and arm a real phone "
+        "call. Wrap it in FakeNet, or stub the function that makes it."
+    )
+
+
+urllib.request.urlopen = _forbidden_urlopen
 
 class FakeNet:
     """Install a queue of responses. Anything beyond the queue is a failure."""
@@ -118,6 +149,8 @@ class FakeNet:
         return self
 
     def __exit__(self, *exc):
+        # Restores the guard, not the real urlopen: outside a FakeNet the
+        # network must stay unreachable for the rest of the run.
         urllib.request.urlopen = self._real
         return False
 
@@ -225,3 +258,16 @@ class Suite:
             "ok": not self.failed and not self.crashed and not self.skipped
                   and self.total >= self.expect_at_least,
         }
+
+
+# Telegram rejects a bare "&" or "<" that is not a valid entity or one of the
+# tags it supports, and Telegram.call swallows the 400 -- so the message simply
+# never arrives. This is the check that would have caught it.
+_TG_BAD = re.compile(
+    r"&(?!(?:amp|lt|gt|quot|#\d+);)"
+    r"|<(?!/?(?:b|strong|i|em|u|ins|s|strike|del|a|code|pre|tg-spoiler|blockquote)[\s>/])"
+)
+
+
+def unescaped(text: str) -> list[str]:
+    return [m.group(0) for m in _TG_BAD.finditer(text or "")]

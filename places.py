@@ -424,7 +424,30 @@ def read_cache() -> list[dict]:
     return [r for r in (rows or []) if isinstance(r, dict) and r.get("name")]
 
 
-def write_cache(rows: list[dict]) -> None:
+def write_cache(rows: list[dict], replace: bool = False) -> None:
+    """Merge into the cache. Only --refresh-cache may replace it.
+
+    This used to overwrite wholesale, which meant a PARTIAL Overpass run --
+    one bounding box out of three answering, which is exactly what conference
+    wifi does -- destroyed everything a full harvest had collected. Measured:
+    200 callable rows down to 1, unrecoverable without network. The cache is
+    the only layer that still carries phone numbers when Overpass is down, so
+    a normal search must only ever be able to ADD to it.
+    """
+    if not replace:
+        existing = read_cache()
+        if existing:
+            merged = {_norm_key(r.get("name", "")): r for r in existing if r.get("name")}
+            for row in rows:
+                key = _norm_key(row.get("name", ""))
+                if not key:
+                    continue
+                held = merged.get(key)
+                # A row with a phone always beats one without, whichever side
+                # it came from.
+                if held is None or (row.get("phone") and not held.get("phone")):
+                    merged[key] = row
+            rows = list(merged.values())
     try:
         CACHE_PATH.write_text(
             json.dumps({"places": rows, "count": len(rows), "written_at": time.time()},
@@ -532,7 +555,7 @@ if __name__ == "__main__":
             print(f"[places] {area_key}: {len(batch)} rows, {sum(1 for r in batch if r['phone'])} callable")
             harvested.extend(batch)
         ranked = dedupe_and_rank(harvested)
-        write_cache(ranked)
+        write_cache(ranked, replace=True)   # rebuilding is what this flag is for
         print(f"\n[places] cache written: {len(ranked)} places, "
               f"{sum(1 for r in ranked if r['phone'])} with a dialable number -> {CACHE_PATH}")
         raise SystemExit(0)

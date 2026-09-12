@@ -27,6 +27,7 @@ import urllib.error
 import urllib.request
 
 from envlite import env, env_list
+from tgtext import esc, esc_join
 
 # ---------------------------------------------------------------------------
 # Model chain. Order is verified-working-first, 11 Sep 2026.
@@ -829,36 +830,41 @@ def render_constraints(constraints: dict) -> str:
     """Human-readable constraint list for the group chat.
 
     Quotes are included on purpose. The group has to be able to see the agent's
-    reasoning and say "no, that's wrong" — which is the correction beat of the
+    reasoning and say "no, that's wrong" - which is the correction beat of the
     demo and the only reason anyone would trust it with a phone.
+
+    Everything interpolated here is escaped. This function is the single most
+    exposed message in the project precisely BECAUSE it quotes the chat
+    verbatim: one "&" in what somebody typed and Telegram rejects the whole
+    message, silently.
     """
     lines = ["<b>What I read in the chat</b>"]
     if constraints.get("party_size"):
-        lines.append(f"• Party of <b>{constraints['party_size']}</b>")
+        lines.append(f"\u2022 Party of <b>{esc(constraints['party_size'])}</b>")
     if constraints.get("when_text"):
-        lines.append(f"• When: <b>{constraints['when_text']}</b>")
+        lines.append(f"\u2022 When: <b>{esc(constraints['when_text'])}</b>")
     if constraints.get("budget_per_head_hkd"):
-        lines.append(f"• Budget: ~HK${constraints['budget_per_head_hkd']}/head")
+        lines.append(f"\u2022 Budget: ~HK${esc(constraints['budget_per_head_hkd'])}/head")
 
     for item in constraints.get("hard", []):
-        who = f" ({item['who']})" if item.get("who") else ""
-        quote = f"\n     “{item['quote']}”" if item.get("quote") else ""
-        lines.append(f"• <b>{item['constraint']}</b>{who}{quote}")
+        who = f" ({esc(item['who'])})" if item.get("who") else ""
+        quote = f"\n     \u201c{esc(item['quote'])}\u201d" if item.get("quote") else ""
+        lines.append(f"\u2022 <b>{esc(item['constraint'])}</b>{who}{quote}")
     for item in constraints.get("vetoed", []):
         times = item.get("times_rejected") or 1
-        suffix = f" — rejected {times}×" if times > 1 else ""
-        lines.append(f"• Vetoed: <b>{item['thing']}</b>{suffix}")
+        suffix = f" \u2014 rejected {esc(times)}\u00d7" if times > 1 else ""
+        lines.append(f"\u2022 Vetoed: <b>{esc(item['thing'])}</b>{suffix}")
     for item in constraints.get("coming_from", []):
-        who = item.get("who") or "someone"
-        lines.append(f"• {who} is coming from <b>{item['place']}</b>")
+        who = esc(item.get("who") or "someone")
+        lines.append(f"\u2022 {who} is coming from <b>{esc(item['place'])}</b>")
     for item in constraints.get("soft", [])[:3]:
-        lines.append(f"• <i>prefers</i> {item['constraint']}")
+        lines.append(f"\u2022 <i>prefers</i> {esc(item['constraint'])}")
 
     if constraints.get("open_questions"):
-        lines.append("\n<i>Still unknown: " + "; ".join(constraints["open_questions"]) + "</i>")
+        lines.append("\n<i>Still unknown: " + esc_join(constraints["open_questions"], "; ") + "</i>")
     if len(lines) == 1:
-        lines.append("<i>Nothing concrete yet — keep talking and run /decide again.</i>")
-    lines.append(f"\n<i>via {constraints.get('source', '?')}</i>")
+        lines.append("<i>Nothing concrete yet \u2014 keep talking and run /decide again.</i>")
+    lines.append(f"\n<i>via {esc(constraints.get('source', '?'))}</i>")
     return "\n".join(lines)
 
 

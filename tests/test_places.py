@@ -20,7 +20,7 @@ from harness import FakeNet, Suite, http_error, overpass_ok, timeout_error, url_
 
 
 def run() -> Suite:
-    s = Suite("places", expect_at_least=60)
+    s = Suite("places", expect_at_least=66)
 
     # --- phone normalisation: every real-world shape ----------------------
     good = {
@@ -169,6 +169,44 @@ def run() -> Suite:
 
         places.CACHE_PATH.write_text("{ this is not json", encoding="utf-8")
         s.eq("a corrupt cache reads as empty rather than crashing", places.read_cache(), [])
+    finally:
+        if places.CACHE_PATH.exists():
+            places.CACHE_PATH.unlink()
+        places.CACHE_PATH = original_cache
+
+    # --- the cache may only ever grow ------------------------------------
+    # write_cache used to replace the file wholesale, so a PARTIAL Overpass run
+    # -- one box out of three answering, which is what conference wifi does --
+    # destroyed everything --refresh-cache had harvested. Measured: 200
+    # callable rows down to 1, unrecoverable without network. The cache is the
+    # only layer still carrying phone numbers when Overpass is down.
+    original_cache = places.CACHE_PATH
+    places.CACHE_PATH = Path(__file__).resolve().parent / "_test_merge_cache.json"
+    try:
+        full = [{"name": f"Place {i}", "phone": f"+8522000000{i}", "area": "Central",
+                 "cuisine": "x", "source": "osm"} for i in range(5)]
+        places.write_cache(full, replace=True)
+        s.eq("a full harvest writes everything", len(places.read_cache()), 5)
+
+        places.write_cache([{"name": "Place 0", "phone": "+85220000000",
+                             "area": "Central", "cuisine": "x", "source": "osm"}])
+        after = places.read_cache()
+        s.eq("a partial run does NOT destroy the rest", len(after), 5)
+        s.eq("callable rows survive a partial run",
+             sum(1 for r in after if r.get("phone")), 5)
+
+        places.write_cache([{"name": "Brand New", "phone": "+85229999999",
+                             "area": "Wan Chai", "cuisine": "y", "source": "osm"}])
+        s.eq("a partial run can still ADD", len(places.read_cache()), 6)
+
+        places.write_cache([{"name": "Place 1", "phone": None, "area": "Central",
+                             "cuisine": "x", "source": "osm"}])
+        kept = next(r for r in places.read_cache() if r["name"] == "Place 1")
+        s.check("a phoneless row never overwrites a callable one", bool(kept.get("phone")))
+
+        places.write_cache([{"name": "Only One", "phone": "+85221111111"}], replace=True)
+        s.eq("replace=True still rebuilds, because that is what it is for",
+             len(places.read_cache()), 1)
     finally:
         if places.CACHE_PATH.exists():
             places.CACHE_PATH.unlink()

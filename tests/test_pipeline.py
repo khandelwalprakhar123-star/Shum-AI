@@ -12,7 +12,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import pipeline
 from harness import (FakeNet, Suite, gemini_ok, gemini_truncated, http_error,
-                     json_response, openrouter_ok, timeout_error, url_error)
+                     json_response, openrouter_ok, timeout_error, unescaped,
+                     url_error)
 
 CHAT = """Marcus: where friday
 Priya: anywhere but hotpot please
@@ -33,7 +34,7 @@ GOOD = {
 
 
 def run() -> Suite:
-    s = Suite("pipeline", expect_at_least=70)
+    s = Suite("pipeline", expect_at_least=78)
     os.environ["GEMINI_API_KEY"] = "AQ.test-key-not-real"
     os.environ.pop("OPENROUTER_API_KEY", None)
 
@@ -364,6 +365,37 @@ def run() -> Suite:
     s.contains("and gives the exact phrasings that fooled it",
                pipeline.EXTRACT_PROMPT, "im vegetarian")
     s.contains("and says what SOFT is actually for", pipeline.EXTRACT_PROMPT, "genuine wants")
+
+    # --- HTML escaping --------------------------------------------------
+    # render_constraints is the single most exposed message in the project
+    # BECAUSE it quotes the chat verbatim -- that is the whole point of it. One
+    # "&" in what somebody typed and Telegram rejects the entire message with
+    # 400 can't parse entities, Telegram.call returns None, and the constraint
+    # list never arrives. Nothing raises.
+    nasty = pipeline._normalise_constraints({
+        "party_size": 2, "when_text": "2pm & later", "budget_per_head_hkd": 100,
+        "hard": [{"constraint": "no pork & no beef", "who": "A<b>",
+                  "quote": "2 < 3 of us & i can't eat pork"}],
+        "soft": [{"constraint": "Fish & Chips", "who": "", "quote": ""}],
+        "vetoed": [{"thing": "R&B Tea", "times_rejected": 2, "quote": "no & never"}],
+        "coming_from": [{"who": "D&D", "place": "Sha Tin & around"}],
+        "prefer_cuisines": [], "avoid_cuisines": [],
+        "open_questions": ["what time & where?"], "summary_line": "x & y",
+    }, "gemini")
+    rendered = pipeline.render_constraints(nasty)
+    s.eq("the constraint list survives ampersands and angle brackets",
+         unescaped(rendered), [])
+    s.contains("the ampersand is escaped, not dropped", rendered, "&amp;")
+    s.contains("and so is the angle bracket", rendered, "&lt;")
+    s.contains("our own bold tags still work", rendered, "<b>")
+    s.check("the quote is still shown", "can't eat pork" in rendered)
+
+    for label, constraints in [
+        ("an empty extraction", pipeline._empty_constraints("nothing")),
+        ("a keyword pass", pipeline.keyword_constraints("A & B: not hotpot & no pork")),
+    ]:
+        s.eq(f"{label} renders cleanly too",
+             unescaped(pipeline.render_constraints(constraints)), [])
 
     # --- render_constraints shows its evidence ---------------------------
     rendered = pipeline.render_constraints(GOOD)

@@ -40,6 +40,7 @@ sys.path.insert(0, str(ROOT))
 
 import pipeline  # noqa: E402
 from envlite import env, load_env, warn_if_tls_broken  # noqa: E402
+from tgtext import esc  # noqa: E402
 
 PENDING_PATH = HERE / "pending_call.json"
 CALL_LOG_DIR = ROOT / "call_log"
@@ -224,8 +225,8 @@ def render_live(pending: dict, turns: list[dict], finished: bool = False) -> str
     the moment a human can say "no, that's wrong" while it still matters.
     """
     name = pending.get("restaurant_display") or pending.get("restaurant_name") or "the restaurant"
-    head = (f"\u2705 <b>Call finished \u2014 {name}</b>" if finished
-            else f"\U0001f4de <b>On the phone with {name}\u2026</b>")
+    head = (f"\u2705 <b>Call finished \u2014 {esc(name)}</b>" if finished
+            else f"\U0001f4de <b>On the phone with {esc(name)}\u2026</b>")
 
     # Built by concatenation rather than one big f-string: an escape inside an
     # f-string expression is a syntax error before Python 3.12, and this has to
@@ -237,7 +238,7 @@ def render_live(pending: dict, turns: list[dict], finished: bool = False) -> str
     if pending.get("when_text"):
         subtitle += dot + str(pending["when_text"])
 
-    lines = [head, "<i>" + subtitle + "</i>", ""]
+    lines = [head, "<i>" + esc(subtitle) + "</i>", ""]
 
     if not turns:
         lines.append("<i>connecting\u2026</i>")
@@ -246,9 +247,9 @@ def render_live(pending: dict, turns: list[dict], finished: bool = False) -> str
         if not said:
             continue
         if turn.get("source") == "user":
-            lines.append(f"\U0001f3ea <b>{said}</b>")      # the restaurant
+            lines.append(f"\U0001f3ea <b>{esc(said)}</b>")      # the restaurant
         else:
-            lines.append(f"\U0001f916 {said}")             # our agent
+            lines.append(f"\U0001f916 {esc(said)}")             # our agent
 
     if not finished:
         lines.append("\n<i>live \u2014 this message updates as they talk</i>")
@@ -267,25 +268,25 @@ def format_outcome(pending: dict, body: dict) -> str:
     name = pending.get("restaurant_display") or pending.get("restaurant_name") or "the restaurant"
 
     head = {
-        "confirmed": f"✅ <b>Booked — {name}</b>",
-        "booked": f"✅ <b>Booked — {name}</b>",
-        "waitlist": f"⏳ <b>Waitlist — {name}</b>",
-        "declined": f"❌ <b>No table — {name}</b>",
-        "full": f"❌ <b>No table — {name}</b>",
-        "no_answer": f"☎️ <b>No answer — {name}</b>",
-    }.get(status, f"ℹ️ <b>Call finished — {name}</b>")
+        "confirmed": f"✅ <b>Booked — {esc(name)}</b>",
+        "booked": f"✅ <b>Booked — {esc(name)}</b>",
+        "waitlist": f"⏳ <b>Waitlist — {esc(name)}</b>",
+        "declined": f"❌ <b>No table — {esc(name)}</b>",
+        "full": f"❌ <b>No table — {esc(name)}</b>",
+        "no_answer": f"☎️ <b>No answer — {esc(name)}</b>",
+    }.get(status, f"ℹ️ <b>Call finished — {esc(name)}</b>")
 
     lines = [head]
     if collected.get("confirmed_time"):
-        lines.append(f"Time: {collected['confirmed_time']}")
+        lines.append(f"Time: {esc(collected['confirmed_time'])}")
     if collected.get("confirmed_party_size"):
-        lines.append(f"Party: {collected['confirmed_party_size']}")
+        lines.append(f"Party: {esc(collected['confirmed_party_size'])}")
     if collected.get("wait_estimate_minutes"):
-        lines.append(f"Wait: ~{collected['wait_estimate_minutes']} min")
+        lines.append(f"Wait: ~{esc(collected['wait_estimate_minutes'])} min")
     if collected.get("booking_name"):
-        lines.append(f"Under: {collected['booking_name']}")
+        lines.append(f"Under: {esc(collected['booking_name'])}")
     if collected.get("staff_notes"):
-        lines.append(f"Note: {collected['staff_notes']}")
+        lines.append(f"Note: {esc(collected['staff_notes'])}")
 
     turns = body.get("transcript") or []
     if turns:
@@ -294,7 +295,7 @@ def format_outcome(pending: dict, body: dict) -> str:
             who = "\U0001f916" if turn.get("source") in ("ai", "agent") else "\U0001f3ea"
             said = str(turn.get("message", "")).strip()
             if said:
-                lines.append(f"{who} {said}")
+                lines.append(f"{who} {esc(said)}")
 
     source = body.get("outcome_source")
     if source == "transcript (derived)":
@@ -334,8 +335,17 @@ class Handler(BaseHTTPRequestHandler):
     # Only needed by the optional CopilotKit console on :3000. Missing CORS
     # headers surface as a bare "Failed to fetch" with no explanation at all
     # (gotcha 23), so they go in now rather than being debugged later.
+    # Access-Control-Allow-Origin: * was applied to /dial, /outcome, /cancel and
+    # /amend. Those endpoints take no credentials, so a wildcard meant ANY page
+    # the operator happened to have open could arm a queued call or post text
+    # into the group chat under the bot's name. The wildcard was not even
+    # needed: the console proxies same-origin through app/api/bridge, and the
+    # call page is served by this process. Scoped to the console's origin.
+    CONSOLE_ORIGIN = env("CONSOLE_ORIGIN") or "http://localhost:3000"
+
     def _cors(self) -> None:
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Origin", self.CONSOLE_ORIGIN)
+        self.send_header("Vary", "Origin")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
 

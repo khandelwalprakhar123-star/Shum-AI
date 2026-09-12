@@ -43,6 +43,7 @@ import people
 import places
 import pipeline
 from envlite import env, env_flag, env_list, load_env, warn_if_tls_broken
+from tgtext import esc, esc_join
 
 PENDING_PATH = ROOT / "bridge" / "pending_call.json"
 # Chat history on disk. The whole pitch of this project is "it has read the
@@ -135,7 +136,7 @@ class ChatState:
         for line in (text or "").splitlines():
             trimmed = line.strip()
             if trimmed:
-                self.history.append(f"{author}: {trimmed}")
+                self.history.append(f"{esc(author)}: {trimmed}")
 
     def as_text(self) -> str:
         return "\n".join(self.history)
@@ -321,7 +322,7 @@ def handle_decide(tg: Telegram, chat_id: int, state: ChatState) -> None:
         )
         named = places.mentioned_districts(constraints)
         if named:
-            print(f"[bot] districts from the chat: {', '.join(named)} -> areas {wanted_areas}")
+            print(f"[bot] districts from the chat: {esc_join(named)} -> areas {wanted_areas}")
         if not candidates:
             tg.send(chat_id, "I couldn't find any candidate restaurants at all. Search layers are all down.")
             return
@@ -336,16 +337,16 @@ def handle_decide(tg: Telegram, chat_id: int, state: ChatState) -> None:
         lines = ["<b>Three that fit</b>"]
         for index, pick in enumerate(picks, 1):
             phone_note = "" if pick.get("phone") else "  ⚠️ no number — I can't call this one"
-            area = f" · {pick['area']}" if pick.get("area") else ""
-            lines.append(f"\n<b>{index}. {pick['name']}</b>{area}{phone_note}")
+            area = f" · {esc(pick['area'])}" if pick.get("area") else ""
+            lines.append(f"\n<b>{index}. {esc(pick['name'])}</b>{area}{phone_note}")
             if pick.get("why"):
-                lines.append(f"    {pick['why']}")
+                lines.append(f"    {esc(pick['why'])}")
             if pick.get("satisfies"):
-                lines.append(f"    ✓ {', '.join(pick['satisfies'][:3])}")
+                lines.append(f"    ✓ {esc_join(pick['satisfies'][:3])}")
             if pick.get("fails"):
-                lines.append(f"    ✗ {', '.join(pick['fails'][:2])}")
+                lines.append(f"    ✗ {esc_join(pick['fails'][:2])}")
         if proposal.get("tradeoff_line"):
-            lines.append(f"\n<i>{proposal['tradeoff_line']}</i>")
+            lines.append(f"\n<i>{esc(proposal['tradeoff_line'])}</i>")
         callable_n = sum(1 for c in candidates if c.get("phone"))
         lines.append(
             f"\n<i>from {len(candidates)} candidates, {callable_n} with a dialable number "
@@ -420,7 +421,7 @@ def handle_close(tg: Telegram, chat_id: int, state: ChatState) -> None:
 
     winner = state.picks[min(winner_index, len(state.picks) - 1)]
     tally = " · ".join(
-        f"{state.picks[i]['name'][:18]} {counts[i]}" for i in range(min(len(state.picks), len(counts)))
+        f"{esc(state.picks[i]['name'][:18])} {counts[i]}" for i in range(min(len(state.picks), len(counts)))
     )
     state.pending_winner = {"winner": winner, "tally": tally}
     save_state()
@@ -460,7 +461,7 @@ def present_booking(tg: Telegram, chat_id: int, state: ChatState) -> None:
         asked = " and ".join(QUESTION_LABELS[field] for field in missing)
         tg.send(
             chat_id,
-            f"🏆 <b>{winner['name']}</b> wins.\n<i>{tally}</i>\n\n"
+            f"🏆 <b>{esc(winner['name'])}</b> wins.\n<i>{tally}</i>\n\n"
             f"Before I call them — <b>{asked}?</b>\n\n"
             "<i>Just say it here and I'll carry on. I won't guess: the agent would "
             "be saying a made-up number down the phone.</i>"
@@ -475,9 +476,9 @@ def present_booking(tg: Telegram, chat_id: int, state: ChatState) -> None:
         extra = ""
         if winner.get("website"):
             extra = (f"\n\n🔗 They do have a booking page though:\n"
-                     f"{winner['website']}\n\n"
+                     f"{esc(winner['website'])}\n\n"
                      "<i>Someone will have to book it there by hand.</i>")
-        tg.send(chat_id, f"🏆 <b>{winner['name']}</b> wins.\n<i>{tally}</i>\n\n{refusal}{extra}")
+        tg.send(chat_id, f"🏆 <b>{esc(winner['name'])}</b> wins.\n<i>{tally}</i>\n\n{refusal}{extra}")
         return
 
     token = uuid.uuid4().hex[:12]
@@ -505,16 +506,16 @@ def present_booking(tg: Telegram, chat_id: int, state: ChatState) -> None:
     }
 
     card = [
-        f"\U0001f3c6 <b>{winner['name']}</b> wins.",
+        f"\U0001f3c6 <b>{esc(winner['name'])}</b> wins.",
         f"<i>{tally}</i>",
         "",
         "<b>I'm about to phone them.</b>",
-        f"• Dialling: <code>{dial_number}</code>",
-        f"• Party of {party}, {when_text}",
-        f"• Under the name {env('BOOKER_NAME', 'a guest')}",
+        f"• Dialling: <code>{esc(dial_number)}</code>",
+        f"• Party of {esc(party)}, {esc(when_text)}",
+        f"• Under the name {esc(env('BOOKER_NAME', 'a guest'))}",
     ]
     if hard_list:
-        card.append(f"• Mentioning: {', '.join(hard_list[:3])}")
+        card.append(f"• Mentioning: {esc_join(hard_list[:3])}")
     card.append("")
     if demo_override:
         card.append(
@@ -580,7 +581,7 @@ def handle_callback(tg: Telegram, query: dict) -> None:
         save_state()
         PENDING_PATH.parent.mkdir(parents=True, exist_ok=True)
         PENDING_PATH.write_text(json.dumps({"status": "cancelled"}, indent=2), encoding="utf-8")
-        tg.send(chat_id, f"❌ {who} cancelled. Nothing was dialled.")
+        tg.send(chat_id, f"❌ {esc(who)} cancelled. Nothing was dialled.")
         return
 
     if action != "ok":
@@ -600,14 +601,14 @@ def handle_callback(tg: Telegram, query: dict) -> None:
 
     if notify_bridge_dial():
         tg.send(chat_id,
-                f"✅ {who} approved it. The call desk is dialling "
-                f"<code>{payload['dial_number']}</code> now — I'll post the transcript here.")
+                f"✅ {esc(who)} approved it. The call desk is dialling "
+                f"<code>{esc(payload['dial_number'])}</code> now — I'll post the transcript here.")
     else:
         payload["dial"] = True
         PENDING_PATH.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
         tg.send(chat_id,
-                f"✅ {who} approved it, and the booking is queued for "
-                f"<code>{payload['dial_number']}</code>.\n\n"
+                f"✅ {esc(who)} approved it, and the booking is queued for "
+                f"<code>{esc(payload['dial_number'])}</code>.\n\n"
                 "<i>The call desk isn't answering on :8080 though. Start it with "
                 "<code>python3 bridge/server.py</code> and open "
                 "<code>http://localhost:8080/</code> — it'll pick this up automatically.</i>")
@@ -716,10 +717,10 @@ def try_answer(tg: Telegram, chat_id: int, state: ChatState, text: str, author: 
 
     said = []
     if "party_size" in got:
-        said.append(f"party of <b>{state.constraints['party_size']}</b>")
+        said.append(f"party of <b>{esc(state.constraints['party_size'])}</b>")
     if "when_text" in got:
-        said.append(f"<b>{state.constraints['when_text']}</b>")
-    tg.send(chat_id, f"Got it \u2014 {', '.join(said)}. Thanks {author}.")
+        said.append(f"<b>{esc(state.constraints['when_text'])}</b>")
+    tg.send(chat_id, f"Got it \u2014 {esc_join(said)}. Thanks {esc(author)}.")
 
     if still:
         asked = " and ".join(QUESTION_LABELS[field] for field in still)
