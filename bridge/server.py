@@ -575,36 +575,71 @@ class Handler(BaseHTTPRequestHandler):
 def dial_phone(number: str) -> tuple[bool, str]:
     """Ring the operator's own phone, automatically, for free.
 
-    macOS hands a tel: URL to FaceTime, which places the call through a paired
-    iPhone on the same Apple ID (Continuity / "Calls from iPhone"). The call
-    therefore goes out over the operator's real +852 cellular line -- which is
-    the entire reason a Hong Kong restaurant picks up -- at no cost, with no
-    telephony provider, no purchased number and no regulatory bundle.
+    macOS hands a `tel:` URL to whichever app owns telephony -- on current
+    macOS that is Phone.app, which places the call through a paired iPhone over
+    Continuity. So the call goes out on the operator's real +852 cellular line:
+    no telephony provider, no purchased number, no regulatory bundle, no cost,
+    and the local caller ID that is the entire reason a Hong Kong restaurant
+    picks up.
 
-    Crucially this changes nothing about the transcript. The agent still lives
-    in the call page over WebRTC and still hears through the laptop microphone;
-    all this removes is a human tapping digits.
+    This changes nothing about the transcript. The agent still runs in the call
+    page over WebRTC and still hears through the laptop microphone. All it
+    removes is a human tapping digits.
 
-    Requires, and silently does nothing without: an iPhone signed into the same
-    Apple ID with "Calls from iPhone" enabled in FaceTime. Verified present on
-    the build machine (FaceTime.app plus a paired iPhone), but a laptop without
-    those is a normal state, not an error -- the number is on screen and on the
-    approval card either way.
+    TWO BUGS LIVED HERE, both of which reported success:
 
-    OFF BY DEFAULT. See the note in /dial about what this does to the second
-    human in brief section 9.2.
+    1. The URL was "tel://<number>". That is not the tel: scheme -- tel takes no
+       authority component -- and nothing on the system claims it. Measured:
+       "tel://" launched no handler at all, while "tel:" launched Phone.app in
+       1.2 seconds.
+    2. Success was the return value of subprocess.Popen, which only says a
+       process was spawned. `open` exits 0 whether or not any application
+       handles the URL, so a dial that went nowhere reported "dialled: True".
+
+    So it now uses tel: and CONFIRMS a telephony app actually came up before
+    claiming anything. Whether that app then connects the call depends on
+    "Calls from iPhone" being enabled and the iPhone being nearby -- which this
+    process cannot see, and does not pretend to.
     """
     if sys.platform != "darwin":
         return False, f"auto-dial is macOS-only (this is {sys.platform})"
+
     digits = "".join(ch for ch in (number or "") if ch.isdigit() or ch == "+")
     if not digits:
         return False, "no number to dial"
+    masked = digits[:-4] + "****" if len(digits) > 4 else "****"
+
     try:
-        subprocess.Popen(["open", f"tel://{digits}"],
+        # tel:, not tel:// -- see above.
+        subprocess.Popen(["open", f"tel:{digits}"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return True, f"handed tel://{digits[:-4]}**** to FaceTime"
     except (OSError, FileNotFoundError) as exc:
         return False, f"could not hand off the call: {exc}"
+
+    # Confirm a telephony app actually took it. Without this the caller cannot
+    # tell "the phone is ringing" from "nothing happened".
+    for _ in range(8):
+        time.sleep(0.4)
+        try:
+            running = subprocess.run(["pgrep", "-x", "Phone"], capture_output=True).returncode == 0
+            if not running:
+                running = subprocess.run(["pgrep", "-x", "FaceTime"],
+                                         capture_output=True).returncode == 0
+        except (OSError, FileNotFoundError):
+            return True, f"handed tel:{masked} to the system (could not verify)"
+        if running:
+            # Deliberately NOT "dialling". Phone.app coming up proves the
+            # handoff landed, not that a call was placed: on a Mac whose iPhone
+            # has "Calls on Other Devices" switched off, Phone.app opens and
+            # then says "iPhone Calls Not Available - your iPhone is not
+            # configured". Observed on the build machine. This process cannot
+            # see that banner, so it does not claim more than it knows.
+            return True, (f"handed {masked} to the Phone app - watch the phone. "
+                          "If nothing rings, iPhone > Settings > Cellular > "
+                          "Calls on Other Devices needs to be on for this Mac.")
+
+    return False, (f"handed tel:{masked} to the system but no telephony app came up. "
+                   "Dial by hand; the number is on the approval card.")
 
 
 def open_call_page() -> None:

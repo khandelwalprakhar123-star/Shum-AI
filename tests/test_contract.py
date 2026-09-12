@@ -55,7 +55,7 @@ def fields_page_reads() -> set[str]:
 
 
 def run() -> Suite:
-    s = Suite("contract", expect_at_least=66)
+    s = Suite("contract", expect_at_least=70)
 
     written = fields_bot_writes()
     read = fields_page_reads()
@@ -220,6 +220,21 @@ def run() -> Suite:
             "could not hand off the call" in SERVER_SRC)
     s.check("the dialled number is masked in the log, which is on screen "
             "during the demo", 'digits[:-4]' in SERVER_SRC)
+    # tel:// is not the tel: scheme -- it takes no authority component -- and
+    # measurably launched nothing, while tel: launched Phone.app in 1.2s.
+    s.check("it uses tel:, not tel://", 'f"tel:{digits}"' in SERVER_SRC
+            and 'tel://{' not in SERVER_SRC)
+    # `open` exits 0 whether or not anything handles the URL, so a spawn is not
+    # a dial. This reported "dialled: True" for a call that went nowhere.
+    s.check("success means a telephony app came up, not that a process spawned",
+            "pgrep" in SERVER_SRC)
+    # Phone.app opening is not a call either: with "Calls on Other Devices"
+    # off it opens and says "iPhone Calls Not Available". Observed. So the
+    # message must not claim the phone is ringing.
+    s.check("it does not claim to be dialling, only to have handed off",
+            "watch the phone" in SERVER_SRC and "dialling {masked}" not in SERVER_SRC)
+    s.check("and it names the exact setting that makes it ring",
+            "Calls on Other Devices" in SERVER_SRC)
     s.check("it dials only what the approval gate resolved, never raw input",
             'dial_phone(pending.get("dial_number")' in SERVER_SRC)
     s.check("the trade-off against brief 9.2 is written down where it is made",
