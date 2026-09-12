@@ -55,7 +55,7 @@ def fields_page_reads() -> set[str]:
 
 
 def run() -> Suite:
-    s = Suite("contract", expect_at_least=52)
+    s = Suite("contract", expect_at_least=58)
 
     written = fields_bot_writes()
     read = fields_page_reads()
@@ -195,6 +195,19 @@ def run() -> Suite:
             SERVER_SRC.count('turn.get("source") == "user"') >= 1)
     s.check("the live message is truncated to Telegram's limit",
             "[:4000]" in SERVER_SRC)
+
+    # --- fewer manual steps, without losing the rail ----------------------
+    s.check("the page arms the mic itself when already permitted",
+            "autoArm" in PAGE_SRC and '"granted"' in PAGE_SRC)
+    s.check("but keeps the button for a first run", 'id="armBtn"' in PAGE_SRC)
+    s.check("the bridge opens the call desk on startup", "open_call_page" in SERVER_SRC)
+    s.check("and can be told not to", "NO_AUTO_OPEN" in SERVER_SRC)
+    s.check("opening a browser never takes the bridge down",
+            "except (OSError, FileNotFoundError)" in SERVER_SRC)
+    # The rail that must survive all of this: the agent still waits for an
+    # approval, and a human still dials.
+    s.check("auto-arming does not auto-start the agent",
+            "state.armed && !state.running" in PAGE_SRC)
 
     # --- booking links ----------------------------------------------------
     places_src = (ROOT / "places.py").read_text(encoding="utf-8")

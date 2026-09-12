@@ -94,10 +94,11 @@
   <div class="card">
     <h2>Run the call</h2>
     <p class="script">
-      <b>1.</b> Press <b>Arm microphone</b> and allow the prompt. <b>2.</b> Dial the number above on your
-      phone. <b>3.</b> Put the phone on <b>speakerphone</b>, face-down-up beside the laptop mic.
-      <b>4.</b> When a human answers, press <b>Start agent</b>. It discloses that it is an AI in its
-      first sentence.
+      The microphone arms itself if you have allowed it here before — check the bar moves.
+      <b>Then:</b> dial the number above on your phone, put it on <b>speakerphone</b> beside the
+      laptop mic, and approve in Telegram. The agent starts on its own and discloses that it is
+      an AI in its first sentence. <b>Start agent</b> below is only needed if you want to begin
+      before the approval lands.
     </p>
     <div class="row" style="margin-top:14px">
       <button id="armBtn">Arm microphone</button>
@@ -377,8 +378,29 @@ async function boot() {
   if (location.protocol === "file:") {
     log("err", "This page is on file:// — getUserMedia will be refused. Open http://localhost:8080/ instead.");
   }
+  await autoArm();
   poll();
   setInterval(poll, 1200);
+}
+
+// Arm the microphone automatically when Chrome has already been told yes for
+// this origin. getUserMedia only prompts the FIRST time; after that the grant
+// is remembered per-origin, so making the operator press a button on every
+// reload is pure ceremony. The button stays for the first run, and for anyone
+// whose permission state is "prompt".
+//
+// Arming a microphone is not initiating a call and carries no safety meaning:
+// the agent still does not speak until an approval arrives, and a human still
+// dials the phone.
+async function autoArm() {
+  try {
+    if (!navigator.permissions?.query) return;
+    const st = await navigator.permissions.query({ name: "microphone" });
+    if (st.state === "granted") {
+      log("sys", "microphone already permitted for this origin \u2014 arming automatically");
+      await armMicrophone();
+    }
+  } catch { /* Safari and some Chromium builds do not expose the descriptor */ }
 }
 
 $("armBtn").addEventListener("click", armMicrophone);

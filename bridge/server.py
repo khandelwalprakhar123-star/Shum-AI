@@ -24,6 +24,7 @@ the calls that matter.
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 import threading
 import time
@@ -39,7 +40,7 @@ ROOT = HERE.parent
 sys.path.insert(0, str(ROOT))
 
 import pipeline  # noqa: E402
-from envlite import env, load_env, warn_if_tls_broken  # noqa: E402
+from envlite import env, env_flag, load_env, warn_if_tls_broken  # noqa: E402
 from tgtext import esc  # noqa: E402
 
 PENDING_PATH = HERE / "pending_call.json"
@@ -557,13 +558,40 @@ class Handler(BaseHTTPRequestHandler):
             sys.stderr.write("[bridge] %s\n" % (fmt % args))
 
 
+def open_call_page() -> None:
+    """Open the call desk in the default browser when the bridge starts.
+
+    The tab has to exist for the microphone to exist -- WebRTC lives in a page,
+    not in this process -- but nobody should have to remember to go and open
+    it. Combined with the page arming itself on a remembered permission, the
+    operator's only remaining job is the one that has to stay manual: dialling
+    the phone and holding it to the laptop.
+
+    Best effort and silent on failure. A headless run, a locked-down laptop or
+    a machine with no browser are all fine; the page is still reachable.
+    """
+    if env_flag("NO_AUTO_OPEN"):
+        print("[bridge] NO_AUTO_OPEN set \u2014 open the call page yourself")
+        return
+
+    url = f"http://localhost:{PORT}/"
+    opener = {"darwin": ["open", url], "win32": ["cmd", "/c", "start", "", url]}.get(
+        sys.platform, ["xdg-open", url]
+    )
+    try:
+        subprocess.Popen(opener, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        print(f"[bridge] opened the call desk at {url}")
+    except (OSError, FileNotFoundError):
+        print(f"[bridge] could not open a browser \u2014 go to {url} yourself")
+
+
 def main() -> None:
     load_env(ROOT / ".env")
     warn_if_tls_broken("bridge")
     if not env("ELEVENLABS_AGENT_ID"):
         print("[bridge] WARNING: ELEVENLABS_AGENT_ID is empty — the call page will refuse to start.")
     print(f"[bridge] listening on http://localhost:{PORT}")
-    print(f"[bridge] open the call page at  http://localhost:{PORT}/")
+    threading.Timer(1.0, open_call_page).start()   # after the socket is up
     ThreadingHTTPServer(("127.0.0.1", PORT), Handler).serve_forever()
 
 
