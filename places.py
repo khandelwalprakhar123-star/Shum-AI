@@ -84,6 +84,30 @@ DISTRICTS: list[tuple[str, float, float, float, float]] = [
     ("Tseung Kwan O", 22.300, 114.250, 22.330, 114.280),
 ]
 
+# Which bounding box each district sits in, so a district named in the chat can
+# be turned into a search area. Derived from DISTRICTS above rather than
+# duplicated, but stated explicitly because the boxes overlap.
+DISTRICT_TO_AREA: dict[str, str] = {
+    "Kennedy Town": "hk_island_north", "Sai Ying Pun": "hk_island_north",
+    "Sheung Wan": "hk_island_north", "Central": "hk_island_north",
+    "Admiralty": "hk_island_north", "Wan Chai": "hk_island_north",
+    "Causeway Bay": "hk_island_north", "North Point": "hk_island_north",
+    "Quarry Bay": "hk_island_north",
+    "Tsim Sha Tsui": "kowloon_south", "Jordan": "kowloon_south",
+    "Yau Ma Tei": "kowloon_south", "Mong Kok": "kowloon_south",
+    "Hung Hom": "kowloon_south",
+    "Kwun Tong": "kowloon_east",
+    "Sha Tin": "sha_tin", "Tai Wai": "sha_tin", "Fo Tan": "sha_tin",
+    "Tseung Kwan O": "tseung_kwan_o",
+}
+
+# Where Hong Kong groups actually converge when people come from different
+# places: the two ends of the cross-harbour spine. Included alongside any
+# origin-specific area so a Sha Tin commuter still gets Central and Kowloon
+# options rather than only Sha Tin restaurants -- "coming from X" is a travel
+# constraint, not a request to eat in X.
+SPINE_AREAS = ["hk_island_north", "kowloon_south"]
+
 CUISINE_LABELS = {
     "chinese": "Chinese", "cantonese": "Cantonese", "dim_sum": "dim sum",
     "japanese": "Japanese", "sushi": "sushi", "ramen": "ramen",
@@ -131,6 +155,89 @@ def normalise_phone(raw: str | None) -> str | None:
     if len(digits) != 8 or not digits.startswith(HK_MOBILE_LANDLINE_PREFIXES):
         return None  # not a Hong Kong number we are willing to dial
     return "+852" + digits
+
+
+def mentioned_districts(constraints: dict) -> list[str]:
+    """Every Hong Kong district the chat actually named, in the order found.
+
+    Reads coming_from first (someone is commuting and said so), then the free
+    text of every constraint, veto and note. Nothing is assumed: a district that
+    nobody mentioned never appears here.
+    """
+    found: list[str] = []
+
+    def note(name: str) -> None:
+        if name and name not in found:
+            found.append(name)
+
+    for entry in constraints.get("coming_from") or []:
+        place = str((entry or {}).get("place") or "").strip()
+        for district, _, _, _, _ in DISTRICTS:
+            if district.lower() == place.lower():
+                note(district)
+
+    haystack = " ".join(
+        [str(item.get("constraint", "")) for item in (constraints.get("hard") or [])]
+        + [str(item.get("constraint", "")) for item in (constraints.get("soft") or [])]
+        + [str(item.get("thing", "")) for item in (constraints.get("vetoed") or [])]
+        + [str(entry.get("place", "")) for entry in (constraints.get("coming_from") or [])]
+        + (constraints.get("open_questions") or [])
+        + [str(constraints.get("summary_line") or "")]
+    ).lower()
+    for district, _, _, _, _ in DISTRICTS:
+        if re.search(r"\b" + re.escape(district.lower()) + r"\b", haystack):
+            note(district)
+    return found
+
+
+def areas_for(constraints: dict) -> list[str]:
+    """Turn what the chat said into which bounding boxes to search.
+
+    With nothing to go on it falls back to the full list, which is the old
+    behaviour. With an origin named it searches that origin's area AND the
+    cross-harbour spine, because a commuter wants a fair meeting point rather
+    than dinner next to their office.
+    """
+    wanted: list[str] = []
+    for district in mentioned_districts(constraints):
+        area = DISTRICT_TO_AREA.get(district)
+        if area and area not in wanted:
+            wanted.append(area)
+
+    if not wanted:
+        return list(AREAS)
+
+    for area in SPINE_AREAS:
+        if area not in wanted:
+            wanted.append(area)
+    return wanted
+
+
+def relevance_rank(rows: list[dict], constraints: dict) -> list[dict]:
+    """Re-rank an existing pool against the districts the chat named.
+
+    Kept separate from search so it applies to cached rows too -- the cache is
+    territory-wide and constraint-blind by design, so the constraint awareness
+    has to live in the ranking rather than only in the query.
+
+    Phone-bearing still dominates. A perfectly located restaurant we cannot
+    telephone is useless to this agent.
+    """
+    districts = {d.lower() for d in mentioned_districts(constraints)}
+    spine = {"central", "sheung wan", "wan chai", "causeway bay", "admiralty",
+             "tsim sha tsui", "jordan", "mong kok", "yau ma tei"}
+
+    def score(row: dict) -> tuple:
+        area = str(row.get("area") or "").lower()
+        return (
+            bool(row.get("phone")),
+            area in districts,          # a district the chat actually named
+            area in spine,              # otherwise a fair meeting point
+            bool(row.get("cuisine")),
+            bool(area),
+        )
+
+    return sorted(rows, key=score, reverse=True)
 
 
 def _district_for(lat: float | None, lon: float | None) -> str:

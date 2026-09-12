@@ -20,7 +20,7 @@ from harness import FakeNet, Suite, http_error, overpass_ok, timeout_error, url_
 
 
 def run() -> Suite:
-    s = Suite("places", expect_at_least=48)
+    s = Suite("places", expect_at_least=60)
 
     # --- phone normalisation: every real-world shape ----------------------
     good = {
@@ -183,6 +183,51 @@ def run() -> Suite:
     s.eq("find_by_name matches a partial", places.find_by_name(pool, "Samsen")["name"], "Samsen Wanchai")
     s.eq("find_by_name returns None for a stranger", places.find_by_name(pool, "Nowhere At All"), None)
     s.eq("find_by_name on empty input is None", places.find_by_name(pool, ""), None)
+
+    # --- the search follows the conversation ------------------------------
+    # Nothing about WHERE to search may be hardcoded: it has to come from the
+    # districts people actually named. Before this, the candidate pool was the
+    # same territory-wide list no matter what the chat said.
+    sha_tin = {"coming_from": [{"who": "Dan", "place": "Sha Tin"}], "hard": [], "soft": [],
+               "vetoed": [], "open_questions": [], "summary_line": ""}
+    s.eq("an origin in coming_from is detected", places.mentioned_districts(sha_tin), ["Sha Tin"])
+    areas = places.areas_for(sha_tin)
+    s.contains("the origin's own area is searched", areas, "sha_tin")
+    s.check("the cross-harbour spine is searched too",
+            all(a in areas for a in places.SPINE_AREAS),
+            "'coming from X' is a travel constraint, not a request to eat in X")
+
+    free_text = {"coming_from": [], "hard": [{"constraint": "somewhere in Mong Kok"}],
+                 "soft": [], "vetoed": [], "open_questions": [], "summary_line": ""}
+    s.eq("a district named in free constraint text is detected",
+         places.mentioned_districts(free_text), ["Mong Kok"])
+    s.contains("and maps to its area", places.areas_for(free_text), "kowloon_south")
+
+    summary = {"coming_from": [], "hard": [], "soft": [], "vetoed": [],
+               "open_questions": [], "summary_line": "everyone is near Causeway Bay"}
+    s.eq("a district in the summary line is detected too",
+         places.mentioned_districts(summary), ["Causeway Bay"])
+
+    silent = {"coming_from": [], "hard": [], "soft": [], "vetoed": [],
+              "open_questions": [], "summary_line": ""}
+    s.eq("a chat naming no district assumes none", places.mentioned_districts(silent), [])
+    s.eq("and falls back to searching everywhere", len(places.areas_for(silent)), len(places.AREAS))
+    s.eq("an empty constraint dict does not crash", places.mentioned_districts({}), [])
+
+    s.check("a district nobody mentioned never appears",
+            "Tuen Mun" not in places.mentioned_districts(sha_tin))
+
+    pool = [
+        {"name": "Far", "phone": "+85221111111", "area": "Tuen Mun", "cuisine": ""},
+        {"name": "Origin", "phone": "+85222222222", "area": "Sha Tin", "cuisine": ""},
+        {"name": "Spine", "phone": "+85223333333", "area": "Central", "cuisine": ""},
+        {"name": "NoPhone", "phone": None, "area": "Sha Tin", "cuisine": "Thai"},
+    ]
+    ranked = [r["name"] for r in places.relevance_rank(pool, sha_tin)]
+    s.eq("a named district ranks first", ranked[0], "Origin")
+    s.eq("then a fair meeting point", ranked[1], "Spine")
+    s.eq("callable still beats well-located", ranked[-1], "NoPhone")
+    s.eq("re-ranking never drops rows", len(places.relevance_rank(pool, silent)), len(pool))
 
     # --- the query --------------------------------------------------------
     query = places.build_query(places.AREAS["hk_island_north"])

@@ -206,9 +206,20 @@ def handle_decide(tg: Telegram, chat_id: int, state: ChatState) -> None:
         state.constraints = constraints
         tg.send(chat_id, pipeline.render_constraints(constraints))
 
-        osm_rows = places.search_places()
+        # The search follows the chat. areas_for() turns the districts people
+        # actually named into bounding boxes; relevance_rank() then re-ranks
+        # the pool against those districts, which matters because the cache is
+        # territory-wide and constraint-blind by design. Nothing is assumed:
+        # with no district mentioned, areas_for() returns everything.
+        wanted_areas = places.areas_for(constraints)
+        osm_rows = places.search_places(areas=wanted_areas)
         exa_rows = exa_search.search(constraints)
-        candidates = exa_search.merge(osm_rows, exa_rows)
+        candidates = places.relevance_rank(
+            exa_search.merge(osm_rows, exa_rows), constraints
+        )
+        named = places.mentioned_districts(constraints)
+        if named:
+            print(f"[bot] districts from the chat: {', '.join(named)} -> areas {wanted_areas}")
         if not candidates:
             tg.send(chat_id, "I couldn't find any candidate restaurants at all. Search layers are all down.")
             return
@@ -306,9 +317,32 @@ def handle_close(tg: Telegram, chat_id: int, state: ChatState) -> None:
         f"{state.picks[i]['name'][:18]} {counts[i]}" for i in range(min(len(state.picks), len(counts)))
     )
 
+    # NEVER invent these. Defaulting to "party of 4, this evening" meant the
+    # voice agent would say a made-up time out loud to a real restaurant, and
+    # nobody in the group would know it had been guessed. If the conversation
+    # did not settle it, the conversation is where it gets settled - so ask
+    # there rather than filling the gap silently.
+    party = state.constraints.get("party_size")
+    when_text = state.constraints.get("when_text")
+
+    missing = []
+    if not party:
+        missing.append("how many people")
+    if not when_text:
+        missing.append("what time")
+    if missing:
+        tg.send(
+            chat_id,
+            "\U0001f3c6 <b>" + winner["name"] + "</b> wins.\n<i>" + tally + "</i>\n\n"
+            "<b>I won't call yet \u2014 the chat never settled "
+            + " or ".join(missing) + ".</b>\n\n"
+            "I'm not going to guess and have the agent say a made-up number down the "
+            "phone. Say it here, then run /decide and /close again \u2014 I'll read it "
+            "straight off the chat."
+        )
+        return
+
     dial_number, demo_override, refusal = resolve_dial_target(winner.get("phone"))
-    party = state.constraints.get("party_size") or 4
-    when_text = state.constraints.get("when_text") or "this evening"
     hard_list = [h["constraint"] for h in state.constraints.get("hard", []) if h.get("constraint")]
 
     if refusal:

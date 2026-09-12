@@ -57,7 +57,7 @@ def msg(text, chat_id=-100, name="Marcus", update_id=1):
 
 
 def run() -> Suite:
-    s = Suite("bot", expect_at_least=42)
+    s = Suite("bot", expect_at_least=52)
     bot.PENDING_PATH = TMP_PENDING
     for key in ("DEMO_PHONE", "CONSENTED_NUMBERS", "ALLOW_ANY_NUMBER"):
         os.environ.pop(key, None)
@@ -219,6 +219,60 @@ def run() -> Suite:
         s.eq("votes reset on a new poll", st.votes, {})
     finally:
         pl.extract_constraints, pl.propose, pls.search_places, ex.search = saved
+
+    # --- the booking is never invented -----------------------------------
+    # Defaulting to "party of 4, this evening" had the voice agent saying a
+    # made-up time out loud to a real restaurant, with nobody in the group
+    # aware it had been guessed.
+    os.environ["CONSENTED_NUMBERS"] = "+85228519969"
+    for label, constraints, expect in [
+        ("no party size", {"when_text": "Friday 8pm", "hard": []}, "how many people"),
+        ("no time", {"party_size": 6, "hard": []}, "what time"),
+        ("neither", {"hard": []}, "how many people or what time"),
+    ]:
+        st = seeded_state(None)
+        st.constraints = constraints
+        tg = FakeTelegram({"stopPoll": {"options": [
+            {"voter_count": 0}, {"voter_count": 3}, {"voter_count": 0}, {"voter_count": 0}]}})
+        bot.handle_close(tg, -100, st)
+        s.contains(f"{label}: says exactly what is missing", tg.sent_text(), expect)
+        s.check(f"{label}: no approval card is offered",
+                not any("inline_keyboard" in str(p.get("reply_markup", "")) for _, p in tg.calls))
+        s.check(f"{label}: no booking is written",
+                st.approval_payload is None or st.approval_token is None)
+    s.contains("it tells the group where to fix it", tg.sent_text(), "/decide")
+
+    # --- the candidate search follows the chat ----------------------------
+    bot.STATE.clear()
+    st = bot.state_for(-100)
+    for i in range(6):
+        st.add("Dan", f"line {i}")
+    import pipeline as pl2
+    import places as pls2
+    import exa_search as ex2
+    saved2 = (pl2.extract_constraints, pl2.propose, pls2.search_places, ex2.search)
+    seen_areas: list = []
+    pl2.extract_constraints = lambda text: {
+        "party_size": 6, "when_text": "Friday 8pm", "hard": [], "soft": [], "vetoed": [],
+        "coming_from": [{"who": "Dan", "place": "Sha Tin"}], "prefer_cuisines": [],
+        "avoid_cuisines": [], "open_questions": [], "source": "stub", "summary_line": "s"}
+    def capture(areas=None, **kw):
+        seen_areas.append(areas)
+        return [{"name": "A Place", "phone": "+85228033960", "area": "Sha Tin"}]
+    pls2.search_places = capture
+    ex2.search = lambda *a, **k: []
+    pl2.propose = lambda c, cand: {"picks": [
+        {"name": "A Place", "phone": "+85228033960", "area": "Sha Tin", "why": "w",
+         "satisfies": [], "fails": []}], "tradeoff_line": "", "source": "stub"}
+    try:
+        tg = FakeTelegram({"sendPoll": {"message_id": 7, "poll": {"id": "p"}}})
+        bot.handle_decide(tg, -100, st)
+        s.check("search_places is given constraint-derived areas, not called bare",
+                seen_areas and seen_areas[0] is not None, f"got {seen_areas}")
+        s.contains("the origin's area is among them", seen_areas[0] or [], "sha_tin")
+        s.contains("the chat is told where it searched", tg.sent_text(), "Sha Tin")
+    finally:
+        pl2.extract_constraints, pl2.propose, pls2.search_places, ex2.search = saved2
 
     # --- poll_answer routing ---------------------------------------------
     bot.STATE.clear()
